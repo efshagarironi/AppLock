@@ -1,68 +1,1119 @@
-name: Build Android APK
+name: Build AppLock APK
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
-permissions:
-  contents: read
+    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   build:
-    name: Build debug APK
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
-      # Install Gradle directly. This avoids requiring ./gradlew to exist.
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-
-      - name: Find Android project
-        id: project
-        shell: bash
+      - name: Create project files
         run: |
-          if [[ -f "settings.gradle" || -f "settings.gradle.kts" ]]; then
-            PROJECT_DIR="."
-          else
-            SETTINGS_FILE="$(find . -type f \( -name settings.gradle -o -name settings.gradle.kts \) -not -path '*/.gradle/*' | head -n 1)"
-            if [[ -z "$SETTINGS_FILE" ]]; then
-              echo "::error::No Android Gradle project found. Add settings.gradle(.kts), build.gradle(.kts), gradle.properties and the app module source code to this repository."
-              exit 1
-            fi
-            PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
-          fi
+          mkdir -p applock/app/src/main/java/com/applock/pro
+          mkdir -p applock/app/src/main/res/values
+          mkdir -p applock/app/src/main/res/drawable
+          cd applock
 
-          if [[ ! -f "$PROJECT_DIR/build.gradle" && ! -f "$PROJECT_DIR/build.gradle.kts" ]]; then
-            echo "::error::The project settings file exists, but the root build.gradle(.kts) file is missing."
-            exit 1
-          fi
+          cat > settings.gradle << 'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AppLock"
+          include ':app'
+          EOF
 
-          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Building Android project in: $PROJECT_DIR"
+          cat > build.gradle << 'EOF'
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+          }
+          EOF
+
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > app/build.gradle << 'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.applock.pro'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.applock.pro"
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'androidx.biometric:biometric:1.1.0'
+              implementation 'androidx.recyclerview:recyclerview:1.3.2'
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:tools="http://schemas.android.com/tools">
+
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+                  tools:ignore="QueryAllPackagesPermission" />
+              <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+                  tools:ignore="ProtectedPermissions" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="قفل برنامه"
+                  android:supportsRtl="true"
+                  android:theme="@style/AppTheme">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <activity
+                      android:name=".LockActivity"
+                      android:exported="false"
+                      android:excludeFromRecents="true"
+                      android:launchMode="singleTask"
+                      android:taskAffinity="" />
+
+                  <service
+                      android:name=".LockService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="app_lock" />
+                  </service>
+
+                  <receiver
+                      android:name=".BootReceiver"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                      </intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/values/styles.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
+                  <item name="colorPrimary">#1E88E5</item>
+                  <item name="colorAccent">#1E88E5</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_launcher.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="24"
+              android:viewportHeight="24">
+              <path
+                  android:fillColor="#1E88E5"
+                  android:pathData="M0,0h24v24h-24z" />
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M12,4a4,4 0 0,0 -4,4v2H7a1,1 0 0,0 -1,1v8a1,1 0 0,0 1,1h10a1,1 0 0,0 1,-1v-8a1,1 0 0,0 -1,-1h-1V8a4,4 0 0,0 -4,-4zM10,8a2,2 0 0,1 4,0v2h-4z" />
+          </vector>
+          EOF
+
+          cat > app/src/main/java/com/applock/pro/Prefs.java << 'EOF'
+          package com.applock.pro;
+
+          import android.app.AppOpsManager;
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.os.Process;
+
+          import java.security.MessageDigest;
+          import java.util.HashSet;
+          import java.util.Set;
+
+          public class Prefs {
+              static final String[] METHODS = {"اثر انگشت", "تشخیص چهره", "الگو"};
+
+              static SharedPreferences sp(Context c) {
+                  return c.getSharedPreferences("lock", Context.MODE_PRIVATE);
+              }
+
+              static Set<String> locked(Context c) {
+                  return new HashSet<>(sp(c).getStringSet("locked", new HashSet<String>()));
+              }
+
+              static void setLocked(Context c, String pkg, boolean on) {
+                  Set<String> s = locked(c);
+                  if (on) s.add(pkg); else s.remove(pkg);
+                  sp(c).edit().putStringSet("locked", s).apply();
+              }
+
+              static int appMethod(Context c) { return sp(c).getInt("app_method", 0); }
+              static void setAppMethod(Context c, int m) { sp(c).edit().putInt("app_method", m).apply(); }
+              static int selfMethod(Context c) { return sp(c).getInt("self_method", 0); }
+              static void setSelfMethod(Context c, int m) { sp(c).edit().putInt("self_method", m).apply(); }
+              static boolean selfLock(Context c) { return sp(c).getBoolean("self_lock", true); }
+              static void setSelfLock(Context c, boolean v) { sp(c).edit().putBoolean("self_lock", v).apply(); }
+
+              static String hash(String s) {
+                  try {
+                      MessageDigest md = MessageDigest.getInstance("SHA-256");
+                      byte[] d = md.digest(("applock|" + s).getBytes("UTF-8"));
+                      StringBuilder sb = new StringBuilder();
+                      for (byte b : d) sb.append(String.format("%02x", b));
+                      return sb.toString();
+                  } catch (Exception e) {
+                      return s;
+                  }
+              }
+
+              static boolean hasPattern(Context c) { return sp(c).getString("pattern", null) != null; }
+              static void setPattern(Context c, String code) { sp(c).edit().putString("pattern", hash(code)).apply(); }
+              static boolean checkPattern(Context c, String code) {
+                  String h = sp(c).getString("pattern", null);
+                  return h != null && h.equals(hash(code));
+              }
+
+              @SuppressWarnings("deprecation")
+              static boolean hasUsage(Context c) {
+                  AppOpsManager a = (AppOpsManager) c.getSystemService(Context.APP_OPS_SERVICE);
+                  int m = a.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), c.getPackageName());
+                  return m == AppOpsManager.MODE_ALLOWED;
+              }
+
+              static int dp(Context c, int v) {
+                  return (int) (v * c.getResources().getDisplayMetrics().density + 0.5f);
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/applock/pro/PatternView.java << 'EOF'
+          package com.applock.pro;
+
+          import android.content.Context;
+          import android.graphics.Canvas;
+          import android.graphics.Paint;
+          import android.view.MotionEvent;
+          import android.view.View;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          public class PatternView extends View {
+              public interface Listener { void onDone(String code); }
+
+              public Listener listener;
+              private final Paint dot = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint on = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
+              private final float[] cx = new float[9];
+              private final float[] cy = new float[9];
+              private final List<Integer> path = new ArrayList<>();
+              private float fx, fy, cell;
+              private boolean drawing;
+              private final Runnable clr = new Runnable() {
+                  @Override public void run() { clear(); }
+              };
+
+              public PatternView(Context c) {
+                  super(c);
+                  dot.setColor(0xFF9AA5B1);
+                  on.setColor(0xFF1E88E5);
+                  line.setColor(0xFF1E88E5);
+                  line.setStrokeWidth(Prefs.dp(c, 6));
+                  line.setStrokeCap(Paint.Cap.ROUND);
+              }
+
+              @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
+                  cell = Math.min(w, h) / 3f;
+                  for (int i = 0; i < 9; i++) {
+                      cx[i] = (i % 3 + 0.5f) * cell;
+                      cy[i] = (i / 3 + 0.5f) * cell;
+                  }
+              }
+
+              @Override protected void onDraw(Canvas canvas) {
+                  for (int k = 0; k < path.size() - 1; k++) {
+                      int a = path.get(k), b = path.get(k + 1);
+                      canvas.drawLine(cx[a], cy[a], cx[b], cy[b], line);
+                  }
+                  if (drawing && !path.isEmpty()) {
+                      int l = path.get(path.size() - 1);
+                      canvas.drawLine(cx[l], cy[l], fx, fy, line);
+                  }
+                  float r = Prefs.dp(getContext(), 8);
+                  for (int i = 0; i < 9; i++) {
+                      boolean s = path.contains(i);
+                      canvas.drawCircle(cx[i], cy[i], s ? r * 1.6f : r, s ? on : dot);
+                  }
+              }
+
+              private void hit(float x, float y) {
+                  for (int i = 0; i < 9; i++) {
+                      if (!path.contains(i) && Math.hypot(x - cx[i], y - cy[i]) < cell * 0.28f) {
+                          path.add(i);
+                      }
+                  }
+              }
+
+              private String code() {
+                  StringBuilder sb = new StringBuilder();
+                  for (int i : path) sb.append(i);
+                  return sb.toString();
+              }
+
+              @Override public boolean onTouchEvent(MotionEvent e) {
+                  float x = e.getX(), y = e.getY();
+                  switch (e.getAction()) {
+                      case MotionEvent.ACTION_DOWN:
+                          if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+                          removeCallbacks(clr);
+                          path.clear();
+                          drawing = true;
+                          fx = x; fy = y;
+                          hit(x, y);
+                          break;
+                      case MotionEvent.ACTION_MOVE:
+                          fx = x; fy = y;
+                          hit(x, y);
+                          break;
+                      case MotionEvent.ACTION_UP:
+                      case MotionEvent.ACTION_CANCEL:
+                          drawing = false;
+                          if (e.getAction() == MotionEvent.ACTION_UP && !path.isEmpty() && listener != null) {
+                              listener.onDone(code());
+                          }
+                          break;
+                  }
+                  invalidate();
+                  return true;
+              }
+
+              public void clear() {
+                  path.clear();
+                  drawing = false;
+                  invalidate();
+              }
+
+              public void clearLater() {
+                  removeCallbacks(clr);
+                  postDelayed(clr, 500);
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/applock/pro/LockService.java << 'EOF'
+          package com.applock.pro;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.Service;
+          import android.app.usage.UsageEvents;
+          import android.app.usage.UsageStatsManager;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.content.pm.ServiceInfo;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+
+          public class LockService extends Service {
+              static volatile String unlocked = null;
+              static volatile boolean running = false;
+
+              private final Handler h = new Handler(Looper.getMainLooper());
+              private long last;
+
+              private final BroadcastReceiver off = new BroadcastReceiver() {
+                  @Override public void onReceive(Context c, Intent i) { unlocked = null; }
+              };
+
+              private final Runnable tick = new Runnable() {
+                  @Override public void run() {
+                      try { poll(); } catch (Exception ignored) { }
+                      h.postDelayed(this, 250);
+                  }
+              };
+
+              @Override public IBinder onBind(Intent i) { return null; }
+
+              @Override public int onStartCommand(Intent i, int f, int id) {
+                  if (!running) {
+                      running = true;
+                      startFg();
+                      registerReceiver(off, new IntentFilter(Intent.ACTION_SCREEN_OFF));
+                      last = System.currentTimeMillis() - 500;
+                      h.post(tick);
+                  }
+                  return START_STICKY;
+              }
+
+              private void startFg() {
+                  NotificationManager nm = getSystemService(NotificationManager.class);
+                  nm.createNotificationChannel(new NotificationChannel("lock", "قفل برنامه", NotificationManager.IMPORTANCE_LOW));
+                  Notification n = new Notification.Builder(this, "lock")
+                          .setContentTitle("قفل برنامه فعال است")
+                          .setContentText("برنامه‌های انتخاب‌شده محافظت می‌شوند")
+                          .setSmallIcon(android.R.drawable.ic_lock_lock)
+                          .setOngoing(true)
+                          .build();
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+                  } else {
+                      startForeground(1, n);
+                  }
+              }
+
+              @SuppressWarnings("deprecation")
+              private void poll() {
+                  UsageStatsManager usm = (UsageStatsManager) getSystemService(Context.USAGE_STATS_SERVICE);
+                  long now = System.currentTimeMillis();
+                  UsageEvents ev = usm.queryEvents(last, now);
+                  if (ev == null) return;
+                  UsageEvents.Event e = new UsageEvents.Event();
+                  long maxT = last;
+                  while (ev.hasNextEvent()) {
+                      ev.getNextEvent(e);
+                      if (e.getTimeStamp() > maxT) maxT = e.getTimeStamp();
+                      if (e.getEventType() == UsageEvents.Event.MOVE_TO_FOREGROUND) {
+                          handle(e.getPackageName());
+                      }
+                  }
+                  last = Math.max(maxT + 1, now - 3000);
+              }
+
+              private void handle(String pkg) {
+                  if (pkg == null) return;
+                  if (pkg.equals(getPackageName())) return;
+                  if (pkg.equals("com.android.systemui") || pkg.equals("android")) return;
+                  if (unlocked != null && !unlocked.equals(pkg)) unlocked = null;
+                  if (Prefs.locked(this).contains(pkg) && !pkg.equals(unlocked)) {
+                      Intent i = new Intent(this, LockActivity.class)
+                              .putExtra("pkg", pkg)
+                              .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                      startActivity(i);
+                  }
+              }
+
+              @Override public void onDestroy() {
+                  running = false;
+                  h.removeCallbacks(tick);
+                  try { unregisterReceiver(off); } catch (Exception ignored) { }
+                  super.onDestroy();
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/applock/pro/BootReceiver.java << 'EOF'
+          package com.applock.pro;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.provider.Settings;
+
+          public class BootReceiver extends BroadcastReceiver {
+              @Override public void onReceive(Context c, Intent i) {
+                  if (Intent.ACTION_BOOT_COMPLETED.equals(i.getAction())
+                          && Settings.canDrawOverlays(c)
+                          && Prefs.hasUsage(c)
+                          && !Prefs.locked(c).isEmpty()) {
+                      c.startForegroundService(new Intent(c, LockService.class));
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/applock/pro/LockActivity.java << 'EOF'
+          package com.applock.pro;
+
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.ImageView;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          import androidx.activity.OnBackPressedCallback;
+          import androidx.appcompat.app.AppCompatActivity;
+          import androidx.biometric.BiometricManager;
+          import androidx.biometric.BiometricPrompt;
+          import androidx.core.content.ContextCompat;
+
+          public class LockActivity extends AppCompatActivity {
+              private String pkg = "";
+              private String label = "";
+              private boolean self;
+              private TextView title, status;
+              private ImageView icon;
+              private PatternView pv;
+
+              private int dp(int v) { return Prefs.dp(this, v); }
+
+              private TextView tv(int sp, int color, boolean bold) {
+                  TextView t = new TextView(this);
+                  t.setTextSize(sp);
+                  t.setTextColor(color);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(0, dp(12), 0, 0);
+                  if (bold) t.setTypeface(null, android.graphics.Typeface.BOLD);
+                  return t;
+              }
+
+              @Override protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setGravity(Gravity.CENTER);
+                  root.setBackgroundColor(0xFF0F1B2D);
+                  root.setPadding(dp(24), dp(24), dp(24), dp(24));
+
+                  icon = new ImageView(this);
+                  root.addView(icon, new LinearLayout.LayoutParams(dp(88), dp(88)));
+
+                  title = tv(20, 0xFFFFFFFF, true);
+                  root.addView(title);
+                  status = tv(14, 0xFFB0BEC5, false);
+                  root.addView(status);
+
+                  pv = new PatternView(this);
+                  LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(dp(280), dp(280));
+                  plp.topMargin = dp(16);
+                  root.addView(pv, plp);
+                  pv.setVisibility(View.GONE);
+                  pv.listener = new PatternView.Listener() {
+                      @Override public void onDone(String code) {
+                          if (Prefs.checkPattern(LockActivity.this, code)) {
+                              success();
+                          } else {
+                              status.setText("الگوی اشتباه است");
+                              pv.clearLater();
+                          }
+                      }
+                  };
+
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  row.setGravity(Gravity.CENTER);
+                  LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                  rlp.topMargin = dp(24);
+                  root.addView(row, rlp);
+                  for (int i = 0; i < 3; i++) {
+                      final int m = i;
+                      Button bt = new Button(this);
+                      bt.setText(Prefs.METHODS[i]);
+                      bt.setOnClickListener(new View.OnClickListener() {
+                          @Override public void onClick(View v) { use(m); }
+                      });
+                      row.addView(bt, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+                  }
+                  setContentView(root);
+
+                  getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+                      @Override public void handleOnBackPressed() { goHome(); }
+                  });
+
+                  init(getIntent());
+              }
+
+              @Override protected void onNewIntent(Intent in) {
+                  super.onNewIntent(in);
+                  setIntent(in);
+                  init(in);
+              }
+
+              @Override protected void onUserLeaveHint() {
+                  super.onUserLeaveHint();
+                  finish();
+              }
+
+              private void goHome() {
+                  if (!self) {
+                      Intent h = new Intent(Intent.ACTION_MAIN);
+                      h.addCategory(Intent.CATEGORY_HOME);
+                      h.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                      startActivity(h);
+                  }
+                  finish();
+              }
+
+              private void init(Intent in) {
+                  self = in.getBooleanExtra("self", false);
+                  pkg = in.getStringExtra("pkg");
+                  if (pkg == null) pkg = "";
+                  if (self) {
+                      label = "قفل برنامه";
+                      icon.setImageResource(R.drawable.ic_launcher);
+                      title.setText("ورود به «قفل برنامه»");
+                  } else {
+                      try {
+                          PackageManager pm = getPackageManager();
+                          label = pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString();
+                          icon.setImageDrawable(pm.getApplicationIcon(pkg));
+                      } catch (Exception e) {
+                          label = pkg;
+                      }
+                      title.setText(label + " قفل است");
+                  }
+                  status.setText("");
+                  use(self ? Prefs.selfMethod(this) : Prefs.appMethod(this));
+              }
+
+              private void use(int m) {
+                  if (m == 2) {
+                      showPattern();
+                  } else {
+                      pv.setVisibility(View.GONE);
+                      prompt(m == 1);
+                  }
+              }
+
+              private void showPattern() {
+                  pv.setVisibility(View.VISIBLE);
+                  pv.clear();
+                  status.setText("الگو را بکشید");
+              }
+
+              private void prompt(final boolean face) {
+                  int auth = face ? BiometricManager.Authenticators.BIOMETRIC_WEAK
+                          : BiometricManager.Authenticators.BIOMETRIC_STRONG;
+                  int can = BiometricManager.from(this).canAuthenticate(auth);
+                  if (can != BiometricManager.BIOMETRIC_SUCCESS) {
+                      showPattern();
+                      status.setText(face
+                              ? "تشخیص چهره در این دستگاه فعال یا پشتیبانی نمی‌شود؛ الگو را بکشید"
+                              : "اثر انگشت ثبت نشده یا پشتیبانی نمی‌شود؛ الگو را بکشید");
+                      return;
+                  }
+                  BiometricPrompt.PromptInfo info = new BiometricPrompt.PromptInfo.Builder()
+                          .setTitle(self ? "ورود به قفل برنامه" : "باز کردن " + label)
+                          .setSubtitle(face ? "چهره خود را نشان دهید" : "انگشت خود را روی حسگر بگذارید")
+                          .setNegativeButtonText("استفاده از الگو")
+                          .setAllowedAuthenticators(auth)
+                          .build();
+                  new BiometricPrompt(this, ContextCompat.getMainExecutor(this),
+                          new BiometricPrompt.AuthenticationCallback() {
+                              @Override public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult r) {
+                                  success();
+                              }
+
+                              @Override public void onAuthenticationError(int code, CharSequence msg) {
+                                  if (code == BiometricPrompt.ERROR_NEGATIVE_BUTTON
+                                          || code == BiometricPrompt.ERROR_USER_CANCELED) {
+                                      showPattern();
+                                  } else if (code != BiometricPrompt.ERROR_CANCELED) {
+                                      status.setText(msg);
+                                  }
+                              }
+                          }).authenticate(info);
+              }
+
+              private void success() {
+                  if (self) {
+                      MainActivity.selfOk = true;
+                      MainActivity.grace = 0;
+                      startActivity(new Intent(this, MainActivity.class)
+                              .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
+                  } else {
+                      LockService.unlocked = pkg;
+                  }
+                  finish();
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/applock/pro/MainActivity.java << 'EOF'
+          package com.applock.pro;
+
+          import android.Manifest;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.graphics.Color;
+          import android.graphics.drawable.Drawable;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.text.Editable;
+          import android.text.TextWatcher;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.CheckBox;
+          import android.widget.EditText;
+          import android.widget.ImageView;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import androidx.appcompat.app.AlertDialog;
+          import androidx.appcompat.app.AppCompatActivity;
+          import androidx.recyclerview.widget.LinearLayoutManager;
+          import androidx.recyclerview.widget.RecyclerView;
+
+          import java.text.Collator;
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.Comparator;
+          import java.util.HashSet;
+          import java.util.List;
+          import java.util.Set;
+
+          public class MainActivity extends AppCompatActivity {
+              static boolean selfOk = false;
+              static long grace = 0;
+
+              private boolean leaving = false, asked = false, askedNotif = false;
+              private final List<Item> all = new ArrayList<>();
+              private final List<Item> shown = new ArrayList<>();
+              private Adapter ad;
+              private EditText search;
+              private TextView banner, count;
+
+              static class Item {
+                  String pkg, label;
+                  Drawable icon;
+                  boolean locked;
+              }
+
+              private int dp(int v) { return Prefs.dp(this, v); }
+
+              private boolean gate() {
+                  if (!Prefs.hasPattern(this) || !Prefs.selfLock(this)) return false;
+                  boolean ok = selfOk && (grace == 0 || System.currentTimeMillis() < grace);
+                  if (ok) { grace = 0; return false; }
+                  selfOk = false;
+                  startActivity(new Intent(this, LockActivity.class).putExtra("self", true));
+                  finish();
+                  return true;
+              }
+
+              @Override protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  if (gate()) return;
+                  getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+                  buildUi();
+                  load();
+                  if (!Prefs.hasPattern(this)) patternSetup(false);
+              }
+
+              @Override protected void onStart() {
+                  super.onStart();
+                  if (gate()) return;
+                  if (leaving) {
+                      leaving = false;
+                      asked = false;
+                  }
+              }
+
+              @Override protected void onStop() {
+                  super.onStop();
+                  if (leaving) {
+                      grace = System.currentTimeMillis() + 120000;
+                  } else if (!isChangingConfigurations()) {
+                      selfOk = false;
+                  }
+              }
+
+              @Override protected void onResume() {
+                  super.onResume();
+                  refreshPerms();
+              }
+
+              private void buildUi() {
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setBackgroundColor(0xFFF5F7FA);
+
+                  LinearLayout head = new LinearLayout(this);
+                  head.setOrientation(LinearLayout.HORIZONTAL);
+                  head.setGravity(Gravity.CENTER_VERTICAL);
+                  head.setBackgroundColor(Color.WHITE);
+                  head.setPadding(dp(16), dp(14), dp(16), dp(14));
+                  TextView title = new TextView(this);
+                  title.setText("قفل برنامه");
+                  title.setTextSize(20);
+                  title.setTextColor(0xFF1A1A1A);
+                  title.setTypeface(null, android.graphics.Typeface.BOLD);
+                  head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  TextView gear = new TextView(this);
+                  gear.setText("⚙");
+                  gear.setTextSize(26);
+                  gear.setTextColor(0xFF455A64);
+                  gear.setPadding(dp(8), 0, dp(8), 0);
+                  gear.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) { settingsDialog(); }
+                  });
+                  head.addView(gear);
+                  root.addView(head);
+
+                  banner = new TextView(this);
+                  banner.setText("برای فعال شدن قفل باید دسترسی‌ها را بدهید. اینجا بزنید.");
+                  banner.setTextColor(0xFF5D4037);
+                  banner.setBackgroundColor(0xFFFFF3CD);
+                  banner.setPadding(dp(16), dp(10), dp(16), dp(10));
+                  banner.setVisibility(View.GONE);
+                  banner.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) { requestNext(); }
+                  });
+                  root.addView(banner);
+
+                  search = new EditText(this);
+                  search.setHint("جستجوی برنامه...");
+                  search.setSingleLine(true);
+                  search.setBackgroundColor(Color.WHITE);
+                  search.setPadding(dp(16), dp(12), dp(16), dp(12));
+                  LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  slp.setMargins(dp(12), dp(10), dp(12), dp(4));
+                  root.addView(search, slp);
+                  search.addTextChangedListener(new TextWatcher() {
+                      @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+                      @Override public void onTextChanged(CharSequence s, int a, int b, int c) { filter(); }
+                      @Override public void afterTextChanged(Editable s) { }
+                  });
+
+                  count = new TextView(this);
+                  count.setTextSize(12);
+                  count.setTextColor(0xFF78909C);
+                  count.setPadding(dp(16), dp(2), dp(16), dp(6));
+                  root.addView(count);
+
+                  RecyclerView rv = new RecyclerView(this);
+                  rv.setLayoutManager(new LinearLayoutManager(this));
+                  ad = new Adapter();
+                  rv.setAdapter(ad);
+                  root.addView(rv, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                  setContentView(root);
+              }
+
+              private void load() {
+                  new Thread(new Runnable() {
+                      @Override public void run() {
+                          PackageManager pm = getPackageManager();
+                          Intent mi = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+                          Set<String> locked = Prefs.locked(MainActivity.this);
+                          Set<String> seen = new HashSet<>();
+                          final List<Item> l = new ArrayList<>();
+                          for (ResolveInfo ri : pm.queryIntentActivities(mi, 0)) {
+                              String p = ri.activityInfo.packageName;
+                              if (p.equals(getPackageName()) || !seen.add(p)) continue;
+                              Item it = new Item();
+                              it.pkg = p;
+                              it.label = String.valueOf(ri.loadLabel(pm));
+                              it.icon = ri.loadIcon(pm);
+                              it.locked = locked.contains(p);
+                              l.add(it);
+                          }
+                          final Collator col = Collator.getInstance();
+                          Collections.sort(l, new Comparator<Item>() {
+                              @Override public int compare(Item a, Item b) { return col.compare(a.label, b.label); }
+                          });
+                          runOnUiThread(new Runnable() {
+                              @Override public void run() {
+                                  all.clear();
+                                  all.addAll(l);
+                                  filter();
+                              }
+                          });
+                      }
+                  }).start();
+              }
+
+              private void filter() {
+                  String q = search.getText().toString().trim().toLowerCase();
+                  shown.clear();
+                  for (Item it : all) {
+                      if (q.isEmpty() || it.label.toLowerCase().contains(q) || it.pkg.toLowerCase().contains(q)) {
+                          shown.add(it);
+                      }
+                  }
+                  ad.notifyDataSetChanged();
+                  updateCount();
+              }
+
+              private void updateCount() {
+                  int n = 0;
+                  for (Item it : all) if (it.locked) n++;
+                  count.setText("قفل‌شده: " + n + " از " + all.size() + " برنامه");
+              }
+
+              class Adapter extends RecyclerView.Adapter<Adapter.VH> {
+                  class VH extends RecyclerView.ViewHolder {
+                      ImageView ic;
+                      TextView tv;
+                      CheckBox cb;
+                      VH(View v, ImageView i, TextView t, CheckBox c) {
+                          super(v);
+                          ic = i; tv = t; cb = c;
+                      }
+                  }
+
+                  @Override public VH onCreateViewHolder(ViewGroup p, int t) {
+                      LinearLayout row = new LinearLayout(MainActivity.this);
+                      row.setOrientation(LinearLayout.HORIZONTAL);
+                      row.setGravity(Gravity.CENTER_VERTICAL);
+                      row.setBackgroundColor(Color.WHITE);
+                      row.setPadding(dp(16), dp(10), dp(16), dp(10));
+                      RecyclerView.LayoutParams rlp = new RecyclerView.LayoutParams(
+                              ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                      rlp.bottomMargin = 2;
+                      row.setLayoutParams(rlp);
+                      ImageView ic = new ImageView(MainActivity.this);
+                      row.addView(ic, new LinearLayout.LayoutParams(dp(44), dp(44)));
+                      TextView tv = new TextView(MainActivity.this);
+                      tv.setTextSize(16);
+                      tv.setTextColor(0xFF1A1A1A);
+                      tv.setPadding(dp(12), 0, dp(12), 0);
+                      row.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                      CheckBox cb = new CheckBox(MainActivity.this);
+                      cb.setClickable(false);
+                      cb.setFocusable(false);
+                      row.addView(cb);
+                      return new VH(row, ic, tv, cb);
+                  }
+
+                  @Override public void onBindViewHolder(final VH h, int pos) {
+                      final Item it = shown.get(pos);
+                      h.ic.setImageDrawable(it.icon);
+                      h.tv.setText(it.label);
+                      h.cb.setChecked(it.locked);
+                      h.itemView.setOnClickListener(new View.OnClickListener() {
+                          @Override public void onClick(View v) {
+                              it.locked = !it.locked;
+                              Prefs.setLocked(MainActivity.this, it.pkg, it.locked);
+                              h.cb.setChecked(it.locked);
+                              updateCount();
+                          }
+                      });
+                  }
+
+                  @Override public int getItemCount() { return shown.size(); }
+              }
+
+              // ---------- permissions ----------
+              private void refreshPerms() {
+                  boolean ok = Settings.canDrawOverlays(this) && Prefs.hasUsage(this);
+                  banner.setVisibility(ok ? View.GONE : View.VISIBLE);
+                  if (ok) {
+                      if (!LockService.running) startForegroundService(new Intent(this, LockService.class));
+                      if (Build.VERSION.SDK_INT >= 33 && !askedNotif
+                              && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                          askedNotif = true;
+                          requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
+                      }
+                  } else if (!asked) {
+                      asked = true;
+                      requestNext();
+                  }
+              }
+
+              private void requestNext() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      ask("نمایش روی سایر برنامه‌ها",
+                              "برای نمایش صفحه قفل روی برنامه‌های قفل‌شده این دسترسی لازم است. در صفحه بعد «قفل برنامه» را روشن کنید.",
+                              new Runnable() {
+                                  @Override public void run() {
+                                      leaving = true;
+                                      startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                              Uri.parse("package:" + getPackageName())));
+                                  }
+                              });
+                  } else if (!Prefs.hasUsage(this)) {
+                      ask("دسترسی به آمار استفاده",
+                              "برای تشخیص اینکه کدام برنامه باز شده این دسترسی لازم است. در صفحه بعد «قفل برنامه» را پیدا و روشن کنید.",
+                              new Runnable() {
+                                  @Override public void run() {
+                                      leaving = true;
+                                      startActivity(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS));
+                                  }
+                              });
+                  }
+              }
+
+              private void ask(String t, String m, final Runnable r) {
+                  new AlertDialog.Builder(this)
+                          .setTitle(t)
+                          .setMessage(m)
+                          .setPositiveButton("باز کردن تنظیمات", new android.content.DialogInterface.OnClickListener() {
+                              @Override public void onClick(android.content.DialogInterface d, int w) { r.run(); }
+                          })
+                          .setNegativeButton("بعداً", null)
+                          .show();
+              }
+
+              // ---------- settings ----------
+              private void settingsDialog() {
+                  String[] items = {
+                          "روش باز کردن برنامه‌های قفل‌شده: " + Prefs.METHODS[Prefs.appMethod(this)],
+                          "روش ورود به همین برنامه: " + Prefs.METHODS[Prefs.selfMethod(this)],
+                          "قفل ورود به همین برنامه: " + (Prefs.selfLock(this) ? "روشن" : "خاموش"),
+                          "تغییر الگو",
+                          "بررسی دسترسی‌ها"
+                  };
+                  new AlertDialog.Builder(this)
+                          .setTitle("تنظیمات")
+                          .setItems(items, new android.content.DialogInterface.OnClickListener() {
+                              @Override public void onClick(android.content.DialogInterface d, int w) {
+                                  if (w == 0) pickMethod(false);
+                                  else if (w == 1) pickMethod(true);
+                                  else if (w == 2) {
+                                      boolean nv = !Prefs.selfLock(MainActivity.this);
+                                      Prefs.setSelfLock(MainActivity.this, nv);
+                                      if (nv) selfOk = true;
+                                      Toast.makeText(MainActivity.this, nv ? "قفل ورود روشن شد" : "قفل ورود خاموش شد", Toast.LENGTH_SHORT).show();
+                                  } else if (w == 3) patternSetup(true);
+                                  else {
+                                      asked = false;
+                                      if (Settings.canDrawOverlays(MainActivity.this) && Prefs.hasUsage(MainActivity.this)) {
+                                          Toast.makeText(MainActivity.this, "همه دسترسی‌ها داده شده است", Toast.LENGTH_SHORT).show();
+                                      } else {
+                                          requestNext();
+                                      }
+                                  }
+                              }
+                          })
+                          .show();
+              }
+
+              private void pickMethod(final boolean self) {
+                  int cur = self ? Prefs.selfMethod(this) : Prefs.appMethod(this);
+                  new AlertDialog.Builder(this)
+                          .setTitle(self ? "روش ورود به همین برنامه" : "روش باز کردن برنامه‌های قفل‌شده")
+                          .setSingleChoiceItems(Prefs.METHODS, cur, new android.content.DialogInterface.OnClickListener() {
+                              @Override public void onClick(android.content.DialogInterface d, int w) {
+                                  if (self) Prefs.setSelfMethod(MainActivity.this, w);
+                                  else Prefs.setAppMethod(MainActivity.this, w);
+                                  d.dismiss();
+                              }
+                          })
+                          .show();
+              }
+
+              private void patternSetup(boolean cancelable) {
+                  final PatternView p = new PatternView(this);
+                  final TextView t = new TextView(this);
+                  t.setText("الگوی خود را بکشید (حداقل ۴ نقطه)");
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(0, dp(8), 0, dp(12));
+                  LinearLayout box = new LinearLayout(this);
+                  box.setOrientation(LinearLayout.VERTICAL);
+                  box.setGravity(Gravity.CENTER_HORIZONTAL);
+                  box.setPadding(dp(16), dp(8), dp(16), dp(8));
+                  box.addView(t);
+                  box.addView(p, new LinearLayout.LayoutParams(dp(260), dp(260)));
+                  AlertDialog.Builder bd = new AlertDialog.Builder(this)
+                          .setTitle("ساخت الگو")
+                          .setView(box)
+                          .setCancelable(cancelable);
+                  if (cancelable) bd.setNegativeButton("انصراف", null);
+                  final AlertDialog d = bd.create();
+                  final String[] first = new String[1];
+                  p.listener = new PatternView.Listener() {
+                      @Override public void onDone(String code) {
+                          if (code.length() < 4) {
+                              t.setText("حداقل ۴ نقطه را وصل کنید");
+                              p.clearLater();
+                          } else if (first[0] == null) {
+                              first[0] = code;
+                              t.setText("الگو را یک بار دیگر بکشید");
+                              p.clearLater();
+                          } else if (first[0].equals(code)) {
+                              Prefs.setPattern(MainActivity.this, code);
+                              selfOk = true;
+                              d.dismiss();
+                              Toast.makeText(MainActivity.this, "الگو ذخیره شد", Toast.LENGTH_SHORT).show();
+                          } else {
+                              first[0] = null;
+                              t.setText("الگوها یکسان نبودند؛ از اول بکشید");
+                              p.clearLater();
+                          }
+                      }
+                  };
+                  d.show();
+              }
+          }
+          EOF
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
 
       - name: Build debug APK
-        working-directory: ${{ steps.project.outputs.dir }}
-        run: gradle --no-daemon assembleDebug
+        working-directory: applock
+        run: gradle assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Smart-App-Lock-debug-APK
-          path: |
-            ${{ steps.project.outputs.dir }}/**/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-          retention-days: 14
+          name: AppLock-APK
+          path: applock/app/build/outputs/apk/debug/app-debug.apk
