@@ -189,6 +189,7 @@ jobs:
                       android:name=".LockActivity"
                       android:exported="false"
                       android:excludeFromRecents="true"
+                      android:autoRemoveFromRecents="true"
                       android:launchMode="singleTask"
                       android:taskAffinity="" />
 
@@ -668,10 +669,20 @@ jobs:
                   lastPkg = pkg;
                   lastAt = now;
                   showCover(c, pkg);
+                  launch(c, pkg);
+              }
+
+              // Starts the lock screen with no transition animation and keeps it out of the recents list.
+              private static void launch(Context c, String key) {
                   Intent i = new Intent(c, LockActivity.class)
-                          .putExtra("pkg", pkg)
-                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
-                  c.startActivity(i);
+                          .putExtra("pkg", key)
+                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION
+                                  | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+                  try {
+                      c.startActivity(i, android.app.ActivityOptions.makeCustomAnimation(c, 0, 0).toBundle());
+                  } catch (Exception e) {
+                      c.startActivity(i);
+                  }
               }
 
               private static final java.util.HashMap<String, Long> ALLOW = new java.util.HashMap<>();
@@ -694,10 +705,7 @@ jobs:
                   lastPkg = key;
                   lastAt = now;
                   showCover(c, key);
-                  Intent i = new Intent(c, LockActivity.class)
-                          .putExtra("pkg", key)
-                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
-                  c.startActivity(i);
+                  launch(c, key);
               }
 
               static void showCover(Context c, String pkg) {
@@ -711,6 +719,7 @@ jobs:
                       v.setOrientation(LinearLayout.VERTICAL);
                       v.setGravity(Gravity.CENTER);
                       v.setBackgroundColor(0xFF0F1B2D);
+                      v.setPadding(Prefs.dp(c, 24), Prefs.dp(c, 24), Prefs.dp(c, 24), Prefs.dp(c, 24));
                       v.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
                       ImageView ic = new ImageView(c);
                       TextView t = new TextView(c);
@@ -727,11 +736,21 @@ jobs:
                       }
                       t.setText(label + " قفل است");
                       t.setTextColor(0xFFFFFFFF);
-                      t.setTextSize(20);
-                      t.setGravity(Gravity.CENTER);
-                      t.setPadding(0, Prefs.dp(c, 12), 0, 0);
-                      v.addView(ic, new LinearLayout.LayoutParams(Prefs.dp(c, 88), Prefs.dp(c, 88)));
-                      v.addView(t);
+                  t.setTextSize(20);
+                  t.setTypeface(null, android.graphics.Typeface.BOLD);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(0, Prefs.dp(c, 12), 0, 0);
+                  v.addView(ic, new LinearLayout.LayoutParams(Prefs.dp(c, 88), Prefs.dp(c, 88)));
+                  v.addView(t);
+                  if (Prefs.appMethod(c) == 2) {
+                      TextView st = new TextView(c);
+                      st.setTextSize(14);
+                      st.setText(" ");
+                      st.setPadding(0, Prefs.dp(c, 12), 0, 0);
+                      v.addView(st);
+                      v.addView(new View(c), new LinearLayout.LayoutParams(Prefs.dp(c, 280), Prefs.dp(c, 280 + 16)));
+                      v.addView(new View(c), new LinearLayout.LayoutParams(Prefs.dp(c, 280), Prefs.dp(c, 24 + 48)));
+                  }
                       WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                               ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                               type,
@@ -743,7 +762,7 @@ jobs:
                       wm.addView(v, lp);
                       cover = v;
                       coverWm = wm;
-                      H.postDelayed(HIDE, 4000);
+                      H.postDelayed(HIDE, 6000);
                   } catch (Exception ignored) { }
               }
 
@@ -1086,6 +1105,7 @@ jobs:
                   String pkg = p.toString();
                   int t = e.getEventType();
                   if (t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                      if (Prefs.accMode(this)) Guard.onFg(this, pkg);
                       if (featOn) {
                           if (pkg.equals(getPackageName())) {
                               clearShields();
@@ -1094,8 +1114,6 @@ jobs:
                               requestScan(pkg);
                           }
                       }
-                      if (!Prefs.accMode(this)) return;
-                      Guard.onFg(this, pkg);
                   } else if (featOn && (t == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
                           || t == AccessibilityEvent.TYPE_VIEW_SCROLLED)) {
                       if (!pkg.equals(getPackageName())) requestScan(pkg);
@@ -1395,8 +1413,10 @@ jobs:
           import android.content.Intent;
           import android.content.pm.PackageManager;
           import android.graphics.drawable.Drawable;
+          import android.os.Build;
           import android.os.Bundle;
           import android.view.View;
+          import android.view.ViewTreeObserver;
 
           import androidx.activity.OnBackPressedCallback;
           import androidx.appcompat.app.AppCompatActivity;
@@ -1407,6 +1427,10 @@ jobs:
 
               @Override protected void onCreate(Bundle b) {
                   super.onCreate(b);
+                  overridePendingTransition(0, 0);
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      try { setRecentsScreenshotEnabled(false); } catch (Throwable ignored) { }
+                  }
                   getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
                   panel = new LockPanel(this, false, new Runnable() {
                       @Override public void run() { success(); }
@@ -1445,9 +1469,31 @@ jobs:
 
               @Override protected void onResume() {
                   super.onResume();
-                  Guard.hideCover();
                   Guard.lockPkg = pkg;
                   panel.resumeCheck();
+                  hideCoverWhenDrawn();
+              }
+
+              // The cover stays until this screen has really been drawn, so there is no black flash or jump.
+              private void hideCoverWhenDrawn() {
+                  final View d = getWindow().getDecorView();
+                  d.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+                      @Override public boolean onPreDraw() {
+                          d.getViewTreeObserver().removeOnPreDrawListener(this);
+                          d.postDelayed(new Runnable() {
+                              @Override public void run() { Guard.hideCover(); }
+                          }, 120);
+                          return true;
+                      }
+                  });
+                  d.postDelayed(new Runnable() {
+                      @Override public void run() { Guard.hideCover(); }
+                  }, 500);
+              }
+
+              @Override public void finish() {
+                  super.finish();
+                  overridePendingTransition(0, 0);
               }
 
               @Override protected void onDestroy() {
@@ -1459,7 +1505,7 @@ jobs:
               @Override protected void onUserLeaveHint() {
                   super.onUserLeaveHint();
                   Guard.lockPkg = null;
-                  finish();
+                  finishAndRemoveTask();
               }
 
               private void goHome() {
@@ -1468,14 +1514,14 @@ jobs:
                   h.addCategory(Intent.CATEGORY_HOME);
                   h.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                   startActivity(h);
-                  finish();
+                  finishAndRemoveTask();
               }
 
               private void success() {
                   if (pkg.startsWith("feat:")) Guard.allow(pkg, 90000);
                   else Guard.unlocked = pkg;
                   Guard.lockPkg = null;
-                  finish();
+                  finishAndRemoveTask();
               }
           }
           EOF
@@ -1660,14 +1706,14 @@ jobs:
                   gear.setOnClickListener(new View.OnClickListener() {
                       @Override public void onClick(View v) { settingsDialog(); }
                   });
-                  chipFree = makeChip(0xFFECEFF1, 0xFF455A64);
+                  chipFree = makeChip(0xFFECEFF1, 0xFF455A64, true);
                   chipFree.setOnClickListener(new View.OnClickListener() {
                       @Override public void onClick(View v) { openSub(false); }
                   });
                   LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40));
                   clp.setMargins(dp(4), 0, dp(4), 0);
                   head.addView(chipFree, clp);
-                  chipLocked = makeChip(0xFFE3F2FD, 0xFF1565C0);
+                  chipLocked = makeChip(0xFFE3F2FD, 0xFF1565C0, false);
                   chipLocked.setOnClickListener(new View.OnClickListener() {
                       @Override public void onClick(View v) { openSub(true); }
                   });
@@ -1771,11 +1817,47 @@ jobs:
                   int n = 0;
                   for (Item it : all) if (it.locked) n++;
                   count.setText("قفل‌شده: " + n + " از " + all.size() + " برنامه");
-                  if (chipLocked != null) chipLocked.setText("🔒 " + n);
-                  if (chipFree != null) chipFree.setText("🔓 " + (all.size() - n));
+                  if (chipLocked != null) chipLocked.setText(String.valueOf(n));
+                  if (chipFree != null) chipFree.setText(String.valueOf(all.size() - n));
               }
 
-              private TextView makeChip(int bg, int fg) {
+              // Small drawn padlock: closed (locked apps) or open (unlocked apps).
+              static class LockIcon extends Drawable {
+                  private final boolean open;
+                  private final int size;
+                  private final android.graphics.Paint p = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+
+                  LockIcon(boolean open, int color, int size) {
+                      this.open = open;
+                      this.size = size;
+                      p.setColor(color);
+                  }
+
+                  @Override public void draw(android.graphics.Canvas c) {
+                      android.graphics.Rect b = getBounds();
+                      float w = b.width(), h = b.height();
+                      c.save();
+                      c.translate(b.left, b.top);
+                      p.setStyle(android.graphics.Paint.Style.FILL);
+                      c.drawRoundRect(new android.graphics.RectF(0.16f * w, 0.48f * h, 0.84f * w, 0.94f * h), 0.12f * w, 0.12f * w, p);
+                      p.setStyle(android.graphics.Paint.Style.STROKE);
+                      p.setStrokeWidth(0.11f * w);
+                      p.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+                      float top = open ? 0.04f : 0.12f;
+                      float legTop = open ? 0.24f : 0.32f;
+                      c.drawArc(new android.graphics.RectF(0.30f * w, top * h, 0.70f * w, (top + 0.40f) * h), 180, 180, false, p);
+                      c.drawLine(0.30f * w, legTop * h, 0.30f * w, 0.50f * h, p);
+                      if (!open) c.drawLine(0.70f * w, legTop * h, 0.70f * w, 0.50f * h, p);
+                      c.restore();
+                  }
+
+                  @Override public int getIntrinsicWidth() { return size; }
+                  @Override public int getIntrinsicHeight() { return size; }
+                  @Override public void setAlpha(int a) { p.setAlpha(a); }
+                  @Override public void setColorFilter(android.graphics.ColorFilter f) { p.setColorFilter(f); }
+                  @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
+              }
+              private TextView makeChip(int bg, int fg, boolean open) {
                   TextView t = new TextView(this);
                   t.setTextSize(16);
                   t.setTextColor(fg);
@@ -1783,6 +1865,10 @@ jobs:
                   t.setGravity(Gravity.CENTER);
                   t.setPadding(dp(12), 0, dp(12), 0);
                   t.setMinWidth(dp(56));
+                  LockIcon ic = new LockIcon(open, fg, dp(18));
+                  ic.setBounds(0, 0, dp(18), dp(18));
+                  t.setCompoundDrawablesRelative(ic, null, null, null);
+                  t.setCompoundDrawablePadding(dp(6));
                   GradientDrawable g = new GradientDrawable();
                   g.setColor(bg);
                   g.setCornerRadius(dp(12));
