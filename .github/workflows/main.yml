@@ -186,6 +186,16 @@ jobs:
                       </intent-filter>
                   </activity>
 
+                  <activity
+                      android:name=".BioActivity"
+                      android:exported="false"
+                      android:excludeFromRecents="true"
+                      android:autoRemoveFromRecents="true"
+                      android:launchMode="singleTask"
+                      android:taskAffinity=""
+                      android:noHistory="true"
+                      android:theme="@style/BioTheme" />
+
                   <service
                       android:name=".AppLockAccess"
                       android:exported="true"
@@ -691,7 +701,7 @@ jobs:
               private static Set<String> homes = new HashSet<>();
               private static long homesAt = 0;
 
-              private static boolean isHome(Context c, String pkg) {
+              static boolean isHome(Context c, String pkg) {
                   long now = SystemClock.uptimeMillis();
                   if (homesAt == 0 || now - homesAt > 60000) {
                       Set<String> s = new HashSet<>();
@@ -729,6 +739,25 @@ jobs:
                       LABELS.put(pkg, pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString());
                       ICONS.put(pkg, pm.getApplicationIcon(pkg));
                   } catch (Exception ignored) { }
+              }
+
+              static String label(String pkg) {
+                  String l = LABELS.get(pkg);
+                  return l != null ? l : pkg;
+              }
+
+              static Drawable icon(String pkg) { return ICONS.get(pkg); }
+
+              // label -> package of every locked app (used to find their cards in recents)
+              static java.util.Map<String, String> lockedLabels(Context c) {
+                  java.util.HashMap<String, String> m = new java.util.HashMap<>();
+                  PackageManager pm = c.getPackageManager();
+                  for (String p : Prefs.locked(c)) {
+                      load(pm, p);
+                      String l = LABELS.get(p);
+                      if (l != null && l.length() > 0) m.put(l, p);
+                  }
+                  return m;
               }
 
               static void cacheIcons(Context c) {
@@ -796,12 +825,12 @@ jobs:
                       }
                       lp.windowAnimations = R.style.NoAnim;
                       WindowManager wm = (WindowManager) (acc != null ? acc : c).getSystemService(Context.WINDOW_SERVICE);
-                      p.start();
                       wm.addView(p, lp);
                       panel = p;
                       panelWm = wm;
                       lockPkg = pkg;
                       shownAt = System.currentTimeMillis();
+                      p.start();
                   } catch (Exception ignored) { }
               }
 
@@ -812,6 +841,7 @@ jobs:
                   panel = null;
                   panelWm = null;
                   lockPkg = null;
+                  if (p != null) p.cancelPrompt();
                   if (p != null && w != null) {
                       try { w.removeView(p); } catch (Exception ignored) { }
                       spare = p;
@@ -858,6 +888,19 @@ jobs:
                   c.startActivity(h);
               }
 
+              // Fallback only (when the dialog cannot be shown directly): short-lived invisible host.
+              static void startBio(Context c, String label) {
+                  Intent i = new Intent(c, BioActivity.class)
+                          .putExtra("label", label)
+                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION
+                                  | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+                  try {
+                      c.startActivity(i, android.app.ActivityOptions.makeCustomAnimation(c, 0, 0).toBundle());
+                  } catch (Exception e) {
+                      try { c.startActivity(i); } catch (Exception ignored) { fallbackPattern("اثر انگشت در دسترس نیست؛ الگو را بکشید"); }
+                  }
+              }
+
               static void fallbackPattern(String msg) {
                   LockPanel p = panel;
                   if (p != null) p.fallbackPattern(msg);
@@ -895,6 +938,8 @@ jobs:
               private LinearLayout row;
               private String label = "";
               private boolean prompting = false;
+              private int gen = 0;
+              private android.os.CancellationSignal cs;
 
               private int dp(int v) { return Prefs.dp(getContext(), v); }
 
@@ -974,13 +1019,27 @@ jobs:
                   icon.setImageDrawable(ic);
                   title.setText(self ? "ورود به «قفل برنامه»" : label + " قفل است");
                   status.setText("");
+                  cancelPrompt();
+                  pv.setVisibility(View.GONE);
+                  row.setVisibility(View.GONE);
+              }
+
+              // Cancels a pending fingerprint/face dialog; its late callbacks are ignored.
+              public void cancelPrompt() {
+                  gen++;
+                  prompting = false;
+                  if (cs != null) {
+                      try { cs.cancel(); } catch (Exception ignored) { }
+                      cs = null;
+                  }
               }
 
               public void start() {
                   if (act == null && !self) {
-                      // overlay: the pattern is ready at once, fingerprint / face start only when their button is tapped
+                      // overlay: the chosen method (fingerprint by default) starts at once
                       prompting = false;
-                      showPattern();
+                      int m = Prefs.appMethod(getContext());
+                      if (m == 2) showPattern(); else use(m);
                       return;
                   }
                   use(self ? Prefs.selfMethod(getContext()) : Prefs.appMethod(getContext()));
@@ -1025,11 +1084,15 @@ jobs:
 
               @android.annotation.SuppressLint("NewApi")
               private void promptDirect() {
+                  // the pattern and the 3 buttons stay available while the system dialog is open
+                  row.setVisibility(View.VISIBLE);
+                  status.setText("اثر انگشت را روی حسگر بگذارید");
                   if (android.os.Build.VERSION.SDK_INT < 28) {
-                      showPattern();
-                      status.setText("اثر انگشت/چهره در این نسخه اندروید پشتیبانی نمی‌شود؛ الگو را بکشید");
+                      Guard.startBio(getContext(), label);
+                      prompting = true;
                       return;
                   }
+                  final int g = ++gen;
                   try {
                       android.hardware.biometrics.BiometricPrompt.Builder b =
                               new android.hardware.biometrics.BiometricPrompt.Builder(getContext())
@@ -1042,31 +1105,42 @@ jobs:
                       final java.util.concurrent.Executor ex = ContextCompat.getMainExecutor(getContext());
                       b.setNegativeButton("استفاده از الگو", ex, new android.content.DialogInterface.OnClickListener() {
                           @Override public void onClick(android.content.DialogInterface d, int w) {
+                              if (g != gen) return;
                               prompting = false;
                               showPattern();
                           }
                       });
                       android.hardware.biometrics.BiometricPrompt bp = b.build();
+                      cs = new android.os.CancellationSignal();
                       prompting = true;
-                      bp.authenticate(new android.os.CancellationSignal(), ex,
+                      bp.authenticate(cs, ex,
                               new android.hardware.biometrics.BiometricPrompt.AuthenticationCallback() {
                                   @Override public void onAuthenticationSucceeded(
                                           android.hardware.biometrics.BiometricPrompt.AuthenticationResult r) {
+                                      if (g != gen) return;
                                       prompting = false;
                                       onSuccess.run();
                                   }
 
                                   @Override public void onAuthenticationError(int code, CharSequence msg) {
+                                      if (g != gen) return;
                                       prompting = false;
-                                      showPattern();
-                                      // 5 = canceled by system, 10 = user canceled: just show the pattern
-                                      if (code != 5 && code != 10 && code != 13) status.setText(msg);
+                                      // 5 canceled by system, 10 user canceled, 13 negative button: just show the pattern
+                                      if (code == 5 || code == 10 || code == 13) {
+                                          showPattern();
+                                      } else if (code == 7 || code == 9) {
+                                          showPattern();
+                                          status.setText(msg);
+                                      } else {
+                                          // the dialog cannot be shown from here: use the short-lived fallback host
+                                          prompting = true;
+                                          Guard.startBio(getContext(), label);
+                                      }
                                   }
                               });
                   } catch (Throwable t) {
-                      prompting = false;
-                      showPattern();
-                      status.setText("اثر انگشت/چهره در دسترس نیست؛ الگو را بکشید");
+                      Guard.startBio(getContext(), label);
+                      prompting = true;
                   }
               }
 
@@ -1140,7 +1214,7 @@ jobs:
           cat > app/src/main/res/values/strings.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
-              <string name="access_desc">برای تشخیص آنی باز شدن برنامه‌های قفل‌شده و نمایش صفحه قفل پیش از دیده شدن برنامه. این سرویس هیچ اطلاعاتی را نمی‌خواند، ذخیره یا ارسال نمی‌کند.</string>
+              <string name="access_desc">برای تشخیص آنی باز شدن برنامه‌های قفل‌شده، نمایش صفحه قفل، و پوشاندن کارت برنامه‌های قفل‌شده در منوی اخیر. فقط نام برنامه‌های قفل‌شده در صفحه اخیر بررسی می‌شود و هیچ اطلاعاتی ذخیره یا ارسال نمی‌شود.</string>
           </resources>
           EOF
 
@@ -1149,8 +1223,8 @@ jobs:
           <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
               android:accessibilityEventTypes="typeWindowStateChanged"
               android:accessibilityFeedbackType="feedbackGeneric"
-              android:accessibilityFlags="flagIncludeNotImportantViews"
-              android:canRetrieveWindowContent="false"
+              android:accessibilityFlags="flagIncludeNotImportantViews|flagReportViewIds"
+              android:canRetrieveWindowContent="true"
               android:notificationTimeout="0"
               android:description="@string/access_desc" />
           EOF
@@ -1159,13 +1233,54 @@ jobs:
           package com.applock.pro;
 
           import android.accessibilityservice.AccessibilityService;
+          import android.accessibilityservice.AccessibilityServiceInfo;
+          import android.graphics.Color;
+          import android.graphics.PixelFormat;
+          import android.graphics.Rect;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.Drawable;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.WindowManager;
           import android.view.accessibility.AccessibilityEvent;
+          import android.view.accessibility.AccessibilityNodeInfo;
+          import android.widget.ImageView;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
 
-          // Instant detection of the app that comes to the front. No activity is ever started:
-          // the only thing this service does is tell Guard which package is in front.
+          import java.util.ArrayList;
+          import java.util.Map;
+
+          // 1) Instant detection of the app that comes to the front (no activity is ever started).
+          // 2) In the recents screen, covers the cards of locked apps so their content is not visible.
           public class AppLockAccess extends AccessibilityService {
               static volatile boolean live = false;
               static volatile AppLockAccess instance = null;
+
+              private static class Cover {
+                  String pkg;
+                  View v;
+                  Rect r = new Rect();
+              }
+
+              private final Handler mh = new Handler(Looper.getMainLooper());
+              private final ArrayList<Cover> covers = new ArrayList<>();
+              private boolean queued = false;
+              private boolean contentOn = false;
+              private long lastScan = 0;
+              private boolean lastEmpty = true;
+              private int budget;
+              private boolean evidence;
+
+              private final Runnable scan = new Runnable() {
+                  @Override public void run() {
+                      queued = false;
+                      try { doScan(); } catch (Throwable ignored) { }
+                  }
+              };
 
               @Override protected void onServiceConnected() {
                   super.onServiceConnected();
@@ -1176,16 +1291,205 @@ jobs:
               }
 
               @Override public void onAccessibilityEvent(AccessibilityEvent e) {
-                  if (e == null || e.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
+                  if (e == null) return;
                   CharSequence pk = e.getPackageName();
                   if (pk == null) return;
-                  CharSequence cn = e.getClassName();
-                  if (cn != null) {
-                      String c = cn.toString();
-                      // popups / menus / toasts of an app are not a new app coming to the front
-                      if (c.startsWith("android.widget.") || c.startsWith("android.view.")) return;
+                  String p = pk.toString();
+                  int type = e.getEventType();
+                  if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                      CharSequence cn = e.getClassName();
+                      if (cn != null) {
+                          String c = cn.toString();
+                          // popups / menus / toasts of an app are not a new app coming to the front
+                          if (c.startsWith("android.widget.") || c.startsWith("android.view.")) return;
+                      }
+                      Guard.onFg(this, p, System.currentTimeMillis());
+                      if (Guard.isHome(this, p)) {
+                          // content/scroll events are only listened to while the launcher (recents) is on screen
+                          setContentEvents(true);
+                          queueScan();
+                      } else if (!p.equals("com.android.systemui") && !p.equals("android") && !p.equals(getPackageName())) {
+                          setContentEvents(false);
+                          clearCovers();
+                      }
+                  } else if (Guard.isHome(this, p)) {
+                      queueScan();
                   }
-                  Guard.onFg(this, pk.toString(), System.currentTimeMillis());
+              }
+
+              private void setContentEvents(boolean on) {
+                  if (contentOn == on) return;
+                  try {
+                      AccessibilityServiceInfo i = getServiceInfo();
+                      if (i == null) return;
+                      int base = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
+                      i.eventTypes = on ? (base | AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                              | AccessibilityEvent.TYPE_VIEW_SCROLLED) : base;
+                      setServiceInfo(i);
+                      contentOn = on;
+                  } catch (Throwable ignored) { }
+              }
+
+              private void queueScan() {
+                  if (queued) return;
+                  if (lastEmpty && System.currentTimeMillis() - lastScan < 400) return;
+                  queued = true;
+                  mh.postDelayed(scan, 30);
+              }
+
+              private static String match(Map<String, String> labels, CharSequence t) {
+                  if (t == null || t.length() == 0) return null;
+                  String s = t.toString().trim();
+                  for (Map.Entry<String, String> en : labels.entrySet()) {
+                      String l = en.getKey();
+                      if (s.equals(l) || s.startsWith(l + ",") || s.startsWith(l + "،")) return en.getValue();
+                  }
+                  return null;
+              }
+
+              private static boolean cardSized(Rect r, int W, int H) {
+                  int w = r.width(), h = r.height();
+                  return w >= W * 0.35f && w <= W * 0.95f && h >= H * 0.12f && h <= H * 0.75f;
+              }
+
+              private void walk(AccessibilityNodeInfo n, Map<String, String> labels, int W, int H,
+                                ArrayList<Object[]> big, ArrayList<Object[]> small, int depth) {
+                  if (n == null || budget-- <= 0 || depth > 32) return;
+                  CharSequence cn = n.getClassName();
+                  String id = n.getViewIdResourceName();
+                  String key = ((cn == null ? "" : cn.toString()) + " " + (id == null ? "" : id)).toLowerCase();
+                  if (key.contains("recents") || key.contains("taskview") || key.contains("task_view")
+                          || key.contains("overview")) evidence = true;
+                  String pkg = match(labels, n.getContentDescription());
+                  if (pkg == null) pkg = match(labels, n.getText());
+                  if (pkg != null) {
+                      Rect r = new Rect();
+                      n.getBoundsInScreen(r);
+                      if (cardSized(r, W, H)) {
+                          big.add(new Object[]{pkg, r});
+                          return;
+                      }
+                      small.add(new Object[]{pkg, n});
+                  }
+                  int c = n.getChildCount();
+                  for (int i = 0; i < c; i++) walk(n.getChild(i), labels, W, H, big, small, depth + 1);
+              }
+
+              private void doScan() {
+                  lastScan = System.currentTimeMillis();
+                  AccessibilityNodeInfo root = getRootInActiveWindow();
+                  if (root == null || root.getPackageName() == null
+                          || !Guard.isHome(this, root.getPackageName().toString())) {
+                      clearCovers();
+                      return;
+                  }
+                  Map<String, String> labels = Guard.lockedLabels(this);
+                  if (labels.isEmpty()) { clearCovers(); return; }
+                  int W = getResources().getDisplayMetrics().widthPixels;
+                  int H = getResources().getDisplayMetrics().heightPixels;
+                  ArrayList<Object[]> big = new ArrayList<>(), small = new ArrayList<>();
+                  budget = 2500;
+                  evidence = false;
+                  walk(root, labels, W, H, big, small, 0);
+                  ArrayList<Object[]> found = new ArrayList<>(big);
+                  if (found.isEmpty() && evidence) {
+                      // the label is a small view inside the card: climb to the card
+                      for (Object[] sm : small) {
+                          AccessibilityNodeInfo n = (AccessibilityNodeInfo) sm[1];
+                          for (int k = 0; k < 8 && n != null; k++) {
+                              n = n.getParent();
+                              if (n == null) break;
+                              Rect r = new Rect();
+                              n.getBoundsInScreen(r);
+                              if (cardSized(r, W, H)) { found.add(new Object[]{sm[0], r}); break; }
+                          }
+                      }
+                  }
+                  lastEmpty = found.isEmpty();
+                  showCovers(found);
+              }
+
+              private View makeCover(String pkg) {
+                  LinearLayout l = new LinearLayout(this);
+                  l.setOrientation(LinearLayout.VERTICAL);
+                  l.setGravity(Gravity.CENTER);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(0xFF0F1B2D);
+                  bg.setCornerRadius(Prefs.dp(this, 22));
+                  l.setBackground(bg);
+                  ImageView iv = new ImageView(this);
+                  Drawable ic = Guard.icon(pkg);
+                  if (ic != null) iv.setImageDrawable(ic);
+                  l.addView(iv, new LinearLayout.LayoutParams(Prefs.dp(this, 56), Prefs.dp(this, 56)));
+                  TextView t = new TextView(this);
+                  t.setText(Guard.label(pkg) + " قفل است");
+                  t.setTextColor(Color.WHITE);
+                  t.setTextSize(15);
+                  t.setTypeface(null, Typeface.BOLD);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(0, Prefs.dp(this, 10), 0, 0);
+                  l.addView(t);
+                  return l;
+              }
+
+              private WindowManager.LayoutParams lpFor(Rect r) {
+                  WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                          r.width(), r.height(),
+                          WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                  | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                                  | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                                  | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                          PixelFormat.OPAQUE);
+                  lp.gravity = Gravity.TOP | Gravity.LEFT;
+                  lp.x = r.left;
+                  lp.y = r.top;
+                  lp.windowAnimations = R.style.NoAnim;
+                  return lp;
+              }
+
+              private void showCovers(ArrayList<Object[]> found) {
+                  WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                  // drop extra covers
+                  while (covers.size() > found.size()) {
+                      Cover c = covers.remove(covers.size() - 1);
+                      try { wm.removeView(c.v); } catch (Exception ignored) { }
+                  }
+                  for (int i = 0; i < found.size(); i++) {
+                      String pkg = (String) found.get(i)[0];
+                      Rect r = (Rect) found.get(i)[1];
+                      try {
+                          if (i < covers.size()) {
+                              Cover c = covers.get(i);
+                              if (!c.pkg.equals(pkg)) {
+                                  wm.removeView(c.v);
+                                  c.pkg = pkg;
+                                  c.v = makeCover(pkg);
+                                  c.r.set(r);
+                                  wm.addView(c.v, lpFor(r));
+                              } else if (!c.r.equals(r)) {
+                                  c.r.set(r);
+                                  wm.updateViewLayout(c.v, lpFor(r));
+                              }
+                          } else {
+                              Cover c = new Cover();
+                              c.pkg = pkg;
+                              c.v = makeCover(pkg);
+                              c.r.set(r);
+                              wm.addView(c.v, lpFor(r));
+                              covers.add(c);
+                          }
+                      } catch (Exception ignored) { }
+                  }
+              }
+
+              private void clearCovers() {
+                  if (covers.isEmpty()) return;
+                  WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                  for (Cover c : covers) {
+                      try { wm.removeView(c.v); } catch (Exception ignored) { }
+                  }
+                  covers.clear();
               }
 
               @Override public void onInterrupt() { }
@@ -1193,6 +1497,9 @@ jobs:
               @Override public boolean onUnbind(android.content.Intent i) {
                   live = false;
                   instance = null;
+                  mh.removeCallbacks(scan);
+                  contentOn = false;
+                  clearCovers();
                   Guard.hideLock();
                   return super.onUnbind(i);
               }
@@ -1201,6 +1508,89 @@ jobs:
                   live = false;
                   instance = null;
                   super.onDestroy();
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/applock/pro/BioActivity.java << 'EOF'
+          package com.applock.pro;
+
+          import android.content.Intent;
+          import android.os.Build;
+          import android.os.Bundle;
+
+          import androidx.appcompat.app.AppCompatActivity;
+          import androidx.biometric.BiometricManager;
+          import androidx.biometric.BiometricPrompt;
+          import androidx.core.content.ContextCompat;
+
+          // FALLBACK ONLY: used when the system fingerprint/face dialog cannot be shown directly from the lock screen.
+          // It lives only while the dialog is on screen and never stays in the background / recents.
+          public class BioActivity extends AppCompatActivity {
+              private boolean showing = false;
+
+              @Override protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  overridePendingTransition(0, 0);
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      try { setRecentsScreenshotEnabled(false); } catch (Throwable ignored) { }
+                  }
+                  show(getIntent());
+              }
+
+              @Override protected void onNewIntent(Intent in) {
+                  super.onNewIntent(in);
+                  setIntent(in);
+                  show(in);
+              }
+
+              private void show(Intent in) {
+                  if (showing) return;
+                  showing = true;
+                  String label = in.getStringExtra("label");
+                  if (label == null) label = "";
+                  BiometricPrompt.PromptInfo info = new BiometricPrompt.PromptInfo.Builder()
+                          .setTitle("باز کردن " + label)
+                          .setSubtitle("چهره، اثر انگشت یا الگو")
+                          .setNegativeButtonText("استفاده از الگو")
+                          .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_WEAK)
+                          .setConfirmationRequired(false)
+                          .build();
+                  new BiometricPrompt(this, ContextCompat.getMainExecutor(this),
+                          new BiometricPrompt.AuthenticationCallback() {
+                              @Override public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult r) {
+                                  showing = false;
+                                  Guard.authSuccess();
+                                  finishAndRemoveTask();
+                              }
+
+                              @Override public void onAuthenticationError(int code, CharSequence msg) {
+                                  showing = false;
+                                  if (code == BiometricPrompt.ERROR_NEGATIVE_BUTTON
+                                          || code == BiometricPrompt.ERROR_USER_CANCELED
+                                          || code == BiometricPrompt.ERROR_CANCELED) {
+                                      Guard.fallbackPattern(null);
+                                  } else {
+                                      Guard.fallbackPattern(String.valueOf(msg));
+                                  }
+                                  finishAndRemoveTask();
+                              }
+                          }).authenticate(info);
+              }
+
+              @Override protected void onUserLeaveHint() {
+                  super.onUserLeaveHint();
+                  finishAndRemoveTask();
+              }
+
+              @Override protected void onStop() {
+                  super.onStop();
+                  if (!isFinishing()) finishAndRemoveTask();
+              }
+
+              @Override public void finish() {
+                  super.finish();
+                  overridePendingTransition(0, 0);
               }
           }
           EOF
