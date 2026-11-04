@@ -823,7 +823,7 @@ jobs:
                           .setSubtitle("چهره، اثر انگشت یا الگو")
                           .setNegativeButtonText("استفاده از الگو")
                           .setAllowedAuthenticators(auth)
-                          .setConfirmationRequired(!face)
+                          .setConfirmationRequired(false)
                           .build();
                   prompting = true;
                   new BiometricPrompt(act, ContextCompat.getMainExecutor(act),
@@ -1027,6 +1027,7 @@ jobs:
           import android.widget.AdapterView;
           import android.widget.CheckBox;
           import android.widget.EditText;
+          import android.widget.ScrollView;
           import android.widget.SeekBar;
           import android.widget.ImageView;
           import android.widget.LinearLayout;
@@ -1384,82 +1385,109 @@ jobs:
               }
 
               // ---------- settings ----------
-              private void settingsDialog() {
-                  String[] items = {
-                          "روش باز کردن برنامه‌های قفل‌شده: " + Prefs.METHODS[Prefs.appMethod(this)],
-                          "روش ورود به همین برنامه: " + Prefs.METHODS[Prefs.selfMethod(this)],
-                          "قفل ورود به همین برنامه: " + (Prefs.selfLock(this) ? "روشن" : "خاموش"),
-                          "حالت دسترس‌پذیری (باز شدن سریع‌تر): " + (Prefs.accMode(this) ? "روشن" : "خاموش"),
-                          "زمان بررسی باز شدن اپ‌ها: " + Prefs.pollMs(this) + " میلی‌ثانیه",
-                          "تغییر الگو",
-                          "پشتیبان",
-                          "بررسی دسترسی‌ها"
-                  };
-                  new AlertDialog.Builder(this)
-                          .setTitle("تنظیمات")
-                          .setItems(items, new DialogInterface.OnClickListener() {
-                              @Override public void onClick(DialogInterface d, int w) {
-                                  if (w == 0) pickMethod(false);
-                                  else if (w == 1) pickMethod(true);
-                                  else if (w == 2) {
-                                      boolean nv = !Prefs.selfLock(MainActivity.this);
-                                      Prefs.setSelfLock(MainActivity.this, nv);
-                                      if (nv) selfOk = true;
-                                      toast(nv ? "قفل ورود روشن شد" : "قفل ورود خاموش شد");
-                                  } else if (w == 3) {
-                                  boolean nv = !Prefs.accMode(MainActivity.this);
-                                  Prefs.setAccMode(MainActivity.this, nv);
-                                  asked = false;
-                                  toast(nv ? "حالت دسترس‌پذیری روشن شد" : "حالت دسترس‌پذیری خاموش شد");
-                                  refreshPerms();
-                              } else if (w == 4) pollDialog();
-                                  else if (w == 5) patternSetup(true);
-                                  else if (w == 6) backupDialog();
-                                  else {
-                                      asked = false;
-                                      if (Settings.canDrawOverlays(MainActivity.this) && (Prefs.accMode(MainActivity.this) ? Prefs.accEnabled(MainActivity.this) : Prefs.hasUsage(MainActivity.this))) {
-                                          toast("همه دسترسی‌ها داده شده است");
-                                      } else {
-                                          requestNext();
-                                      }
-                                  }
-                              }
-                          })
-                          .show();
+              private void addRow(LinearLayout box, final AlertDialog[] dlg, String text, final Runnable r) {
+                  TextView t = new TextView(this);
+                  t.setText(text);
+                  t.setTextSize(16);
+                  t.setTextColor(0xFF1A1A1A);
+                  t.setPadding(dp(8), dp(14), dp(8), dp(14));
+                  t.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) {
+                          if (dlg[0] != null) dlg[0].dismiss();
+                          r.run();
+                      }
+                  });
+                  box.addView(t);
+                  View line = new View(this);
+                  line.setBackgroundColor(0xFFE0E0E0);
+                  box.addView(line, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1));
               }
 
-              private void pollDialog() {
-                  LinearLayout box = new LinearLayout(this);
+              private void settingsDialog() {
+                  final LinearLayout box = new LinearLayout(this);
                   box.setOrientation(LinearLayout.VERTICAL);
-                  box.setPadding(dp(24), dp(16), dp(24), dp(8));
-                  final TextView t = new TextView(this);
-                  t.setGravity(Gravity.CENTER);
-                  t.setTextSize(18);
-                  t.setText(Prefs.pollMs(this) + " میلی‌ثانیه");
-                  final SeekBar sb = new SeekBar(this);
+                  box.setPadding(dp(16), dp(4), dp(16), dp(4));
+                  final AlertDialog[] dlg = new AlertDialog[1];
+
+                  addRow(box, dlg, "روش باز کردن برنامه‌های قفل‌شده: " + Prefs.METHODS[Prefs.appMethod(this)], new Runnable() {
+                      @Override public void run() { pickMethod(false); }
+                  });
+                  addRow(box, dlg, "روش ورود به همین برنامه: " + Prefs.METHODS[Prefs.selfMethod(this)], new Runnable() {
+                      @Override public void run() { pickMethod(true); }
+                  });
+                  addRow(box, dlg, "قفل ورود به همین برنامه: " + (Prefs.selfLock(this) ? "روشن" : "خاموش"), new Runnable() {
+                      @Override public void run() {
+                          boolean nv = !Prefs.selfLock(MainActivity.this);
+                          Prefs.setSelfLock(MainActivity.this, nv);
+                          if (nv) selfOk = true;
+                          toast(nv ? "قفل ورود روشن شد" : "قفل ورود خاموش شد");
+                      }
+                  });
+                  addRow(box, dlg, "حالت دسترس‌پذیری (باز شدن سریع‌تر): " + (Prefs.accMode(this) ? "روشن" : "خاموش"), new Runnable() {
+                      @Override public void run() {
+                          boolean nv = !Prefs.accMode(MainActivity.this);
+                          Prefs.setAccMode(MainActivity.this, nv);
+                          asked = false;
+                          toast(nv ? "حالت دسترس‌پذیری روشن شد" : "حالت دسترس‌پذیری خاموش شد");
+                          refreshPerms();
+                      }
+                  });
+
+                  // slider: check interval 2..90 ms
+                  final TextView pt = new TextView(this);
+                  pt.setText("زمان بررسی باز شدن اپ‌ها: " + Prefs.pollMs(this) + " میلی‌ثانیه");
+                  pt.setTextSize(16);
+                  pt.setTextColor(0xFF1A1A1A);
+                  pt.setPadding(dp(8), dp(14), dp(8), dp(4));
+                  box.addView(pt);
+                  SeekBar sb = new SeekBar(this);
                   sb.setMax(88);
                   sb.setProgress(Prefs.pollMs(this) - 2);
                   sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
                       @Override public void onProgressChanged(SeekBar s, int p, boolean user) {
                           int ms = p + 2;
-                          t.setText(ms + " میلی‌ثانیه");
+                          pt.setText("زمان بررسی باز شدن اپ‌ها: " + ms + " میلی‌ثانیه");
                           Prefs.setPollMs(MainActivity.this, ms);
                       }
                       @Override public void onStartTrackingTouch(SeekBar s) { }
                       @Override public void onStopTrackingTouch(SeekBar s) { }
                   });
-                  TextView note = new TextView(this);
-                  note.setText("اهرم را بکشید تا فاصله زمانی بررسی بین ۲ تا ۹۰ میلی‌ثانیه تغییر کند. عدد کمتر یعنی تشخیص سریع‌تر ولی مصرف باتری و پردازنده بیشتر. این تنظیم فقط وقتی «حالت دسترس‌پذیری» خاموش است اثر دارد.");
-                  note.setTextSize(12);
-                  note.setPadding(0, dp(12), 0, 0);
-                  box.addView(t);
                   box.addView(sb);
+                  TextView note = new TextView(this);
+                  note.setText("اهرم را بکشید تا بین ۲ تا ۹۰ میلی‌ثانیه تغییر کند. عدد کمتر یعنی تشخیص سریع‌تر ولی مصرف باتری بیشتر. فقط وقتی «حالت دسترس‌پذیری» خاموش است اثر دارد.");
+                  note.setTextSize(12);
+                  note.setTextColor(0xFF78909C);
+                  note.setPadding(dp(8), dp(4), dp(8), dp(12));
                   box.addView(note);
-                  new AlertDialog.Builder(this)
-                          .setTitle("زمان بررسی باز شدن اپ‌ها")
-                          .setView(box)
-                          .setPositiveButton("تأیید", null)
-                          .show();
+                  View line = new View(this);
+                  line.setBackgroundColor(0xFFE0E0E0);
+                  box.addView(line, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1));
+
+                  addRow(box, dlg, "تغییر الگو", new Runnable() {
+                      @Override public void run() { patternSetup(true); }
+                  });
+                  addRow(box, dlg, "پشتیبان", new Runnable() {
+                      @Override public void run() { backupDialog(); }
+                  });
+                  addRow(box, dlg, "بررسی دسترسی‌ها", new Runnable() {
+                      @Override public void run() {
+                          asked = false;
+                          if (Settings.canDrawOverlays(MainActivity.this) && (Prefs.accMode(MainActivity.this) ? Prefs.accEnabled(MainActivity.this) : Prefs.hasUsage(MainActivity.this))) {
+                              toast("همه دسترسی‌ها داده شده است");
+                          } else {
+                              requestNext();
+                          }
+                      }
+                  });
+
+                  ScrollView sv = new ScrollView(this);
+                  sv.addView(box);
+                  dlg[0] = new AlertDialog.Builder(this)
+                          .setTitle("تنظیمات")
+                          .setView(sv)
+                          .setNegativeButton("بستن", null)
+                          .create();
+                  dlg[0].show();
               }
 
               private void pickMethod(final boolean self) {
