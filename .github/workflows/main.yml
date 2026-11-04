@@ -22,6 +22,56 @@ jobs:
           mkdir -p applock/app/src/main/res/drawable
           cd applock
 
+          base64 -d > app/fixed.jks << 'EOF'
+          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
+          76iB+dnvDYYCAicQ
+          EOF
+
           cat > settings.gradle << 'EOF'
           pluginManagement {
               repositories {
@@ -66,13 +116,26 @@ jobs:
                   applicationId "com.applock.pro"
                   minSdk 26
                   targetSdk 34
-                  versionCode 1
+                  versionCode Integer.parseInt(System.getenv('GITHUB_RUN_NUMBER') ?: '1')
                   versionName "1.0"
               }
 
+              signingConfigs {
+                  fixed {
+                      storeFile file('fixed.jks')
+                      storePassword 'applock123'
+                      keyAlias 'applock'
+                      keyPassword 'applock123'
+                  }
+              }
+
               buildTypes {
+                  debug {
+                      signingConfig signingConfigs.fixed
+                  }
                   release {
                       minifyEnabled false
+                      signingConfig signingConfigs.fixed
                   }
               }
 
@@ -154,6 +217,8 @@ jobs:
               <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
                   <item name="colorPrimary">#1E88E5</item>
                   <item name="colorAccent">#1E88E5</item>
+                  <item name="android:windowBackground">#FF0F1B2D</item>
+                  <item name="android:windowAnimationStyle">@null</item>
               </style>
           </resources>
           EOF
@@ -375,10 +440,21 @@ jobs:
           import android.os.Handler;
           import android.os.IBinder;
           import android.os.Looper;
+          import android.content.pm.PackageManager;
+          import android.graphics.PixelFormat;
+          import android.provider.Settings;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.WindowManager;
+          import android.widget.ImageView;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
 
           public class LockService extends Service {
               static volatile String unlocked = null;
               static volatile boolean running = false;
+              static LockService inst;
 
               private final Handler h = new Handler(Looper.getMainLooper());
               private long last;
@@ -390,7 +466,7 @@ jobs:
               private final Runnable tick = new Runnable() {
                   @Override public void run() {
                       try { poll(); } catch (Exception ignored) { }
-                      h.postDelayed(this, 250);
+                      h.postDelayed(this, 60);
                   }
               };
 
@@ -399,6 +475,7 @@ jobs:
               @Override public int onStartCommand(Intent i, int f, int id) {
                   if (!running) {
                       running = true;
+                      inst = this;
                       startFg();
                       registerReceiver(off, new IntentFilter(Intent.ACTION_SCREEN_OFF));
                       last = System.currentTimeMillis() - 500;
@@ -450,13 +527,68 @@ jobs:
                       Intent i = new Intent(this, LockActivity.class)
                               .putExtra("pkg", pkg)
                               .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                      showCover(pkg);
                       startActivity(i);
+                  }
+              }
+
+              private View cover;
+              private final Runnable hideRun = new Runnable() {
+                  @Override public void run() { hideCover(); }
+              };
+
+              void showCover(String pkg) {
+                  try {
+                      if (!Settings.canDrawOverlays(this)) return;
+                      hideCover();
+                      LinearLayout v = new LinearLayout(this);
+                      v.setOrientation(LinearLayout.VERTICAL);
+                      v.setGravity(Gravity.CENTER);
+                      v.setBackgroundColor(0xFF0F1B2D);
+                      v.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+                      ImageView ic = new ImageView(this);
+                      TextView t = new TextView(this);
+                      String label = pkg;
+                      try {
+                          PackageManager pm = getPackageManager();
+                          label = pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString();
+                          ic.setImageDrawable(pm.getApplicationIcon(pkg));
+                      } catch (Exception ignored) { }
+                      t.setText(label + " قفل است");
+                      t.setTextColor(0xFFFFFFFF);
+                      t.setTextSize(20);
+                      t.setGravity(Gravity.CENTER);
+                      t.setPadding(0, Prefs.dp(this, 12), 0, 0);
+                      v.addView(ic, new LinearLayout.LayoutParams(Prefs.dp(this, 88), Prefs.dp(this, 88)));
+                      v.addView(t);
+                      WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                              ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+                              WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                              WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                      | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                                      | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                              PixelFormat.OPAQUE);
+                      ((WindowManager) getSystemService(Context.WINDOW_SERVICE)).addView(v, lp);
+                      cover = v;
+                      h.postDelayed(hideRun, 4000);
+                  } catch (Exception ignored) { }
+              }
+
+              void hideCover() {
+                  h.removeCallbacks(hideRun);
+                  if (cover != null) {
+                      try {
+                          ((WindowManager) getSystemService(Context.WINDOW_SERVICE)).removeView(cover);
+                      } catch (Exception ignored) { }
+                      cover = null;
                   }
               }
 
               @Override public void onDestroy() {
                   running = false;
                   h.removeCallbacks(tick);
+                  hideCover();
+                  inst = null;
                   try { unregisterReceiver(off); } catch (Exception ignored) { }
                   super.onDestroy();
               }
@@ -588,6 +720,16 @@ jobs:
                   init(in);
               }
 
+              @Override protected void onResume() {
+                  super.onResume();
+                  if (LockService.inst != null) LockService.inst.hideCover();
+              }
+
+              @Override protected void onDestroy() {
+                  super.onDestroy();
+                  if (LockService.inst != null) LockService.inst.hideCover();
+              }
+
               @Override protected void onUserLeaveHint() {
                   super.onUserLeaveHint();
                   finish();
@@ -705,6 +847,11 @@ jobs:
           import android.provider.Settings;
           import android.text.Editable;
           import android.text.TextWatcher;
+          import java.io.ByteArrayOutputStream;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
           import android.view.Gravity;
           import android.view.View;
           import android.view.ViewGroup;
@@ -1020,6 +1167,7 @@ jobs:
                           "روش ورود به همین برنامه: " + Prefs.METHODS[Prefs.selfMethod(this)],
                           "قفل ورود به همین برنامه: " + (Prefs.selfLock(this) ? "روشن" : "خاموش"),
                           "تغییر الگو",
+                          "پشتیبان",
                           "بررسی دسترسی‌ها"
                   };
                   new AlertDialog.Builder(this)
@@ -1034,6 +1182,7 @@ jobs:
                                       if (nv) selfOk = true;
                                       Toast.makeText(MainActivity.this, nv ? "قفل ورود روشن شد" : "قفل ورود خاموش شد", Toast.LENGTH_SHORT).show();
                                   } else if (w == 3) patternSetup(true);
+                                  else if (w == 4) backupDialog();
                                   else {
                                       asked = false;
                                       if (Settings.canDrawOverlays(MainActivity.this) && Prefs.hasUsage(MainActivity.this)) {
@@ -1045,6 +1194,71 @@ jobs:
                               }
                           })
                           .show();
+              }
+
+              private void backupDialog() {
+                  String[] it = {"پشتیبان‌گیری از تنظیمات", "بازیابی تنظیمات از پشتیبان"};
+                  new AlertDialog.Builder(this)
+                          .setTitle("پشتیبان")
+                          .setItems(it, new android.content.DialogInterface.OnClickListener() {
+                              @Override public void onClick(android.content.DialogInterface d, int w) {
+                                  leaving = true;
+                                  if (w == 0) {
+                                      Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                                      i.addCategory(Intent.CATEGORY_OPENABLE);
+                                      i.setType("application/json");
+                                      i.putExtra(Intent.EXTRA_TITLE, "applock-backup.json");
+                                      startActivityForResult(i, 101);
+                                  } else {
+                                      Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                                      i.addCategory(Intent.CATEGORY_OPENABLE);
+                                      i.setType("*/*");
+                                      startActivityForResult(i, 102);
+                                  }
+                              }
+                          })
+                          .show();
+              }
+
+              @Override protected void onActivityResult(int rc, int res, Intent data) {
+                  super.onActivityResult(rc, res, data);
+                  if (res != RESULT_OK || data == null || data.getData() == null) return;
+                  Uri u = data.getData();
+                  try {
+                      if (rc == 101) {
+                          JSONObject o = new JSONObject();
+                          o.put("version", 1);
+                          o.put("locked", new JSONArray(Prefs.locked(this)));
+                          o.put("app_method", Prefs.appMethod(this));
+                          o.put("self_method", Prefs.selfMethod(this));
+                          o.put("self_lock", Prefs.selfLock(this));
+                          OutputStream os = getContentResolver().openOutputStream(u);
+                          os.write(o.toString(2).getBytes("UTF-8"));
+                          os.close();
+                          Toast.makeText(this, "پشتیبان ذخیره شد", Toast.LENGTH_SHORT).show();
+                      } else if (rc == 102) {
+                          InputStream is = getContentResolver().openInputStream(u);
+                          ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                          byte[] buf = new byte[4096];
+                          int n;
+                          while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
+                          is.close();
+                          JSONObject o = new JSONObject(bo.toString("UTF-8"));
+                          Set<String> s = new HashSet<>();
+                          JSONArray a = o.getJSONArray("locked");
+                          for (int k = 0; k < a.length(); k++) s.add(a.getString(k));
+                          Prefs.sp(this).edit()
+                                  .putStringSet("locked", s)
+                                  .putInt("app_method", o.optInt("app_method", 0))
+                                  .putInt("self_method", o.optInt("self_method", 0))
+                                  .putBoolean("self_lock", o.optBoolean("self_lock", true))
+                                  .apply();
+                          load();
+                          Toast.makeText(this, "تنظیمات بازیابی شد", Toast.LENGTH_SHORT).show();
+                      }
+                  } catch (Exception e) {
+                      Toast.makeText(this, "خطا: فایل پشتیبان معتبر نیست", Toast.LENGTH_LONG).show();
+                  }
               }
 
               private void pickMethod(final boolean self) {
