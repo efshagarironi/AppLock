@@ -290,6 +290,8 @@ jobs:
               static void setSelfLock(Context c, boolean v) { sp(c).edit().putBoolean("self_lock", v).apply(); }
               static boolean accMode(Context c) { return sp(c).getBoolean("acc_mode", true); }
               static void setAccMode(Context c, boolean v) { sp(c).edit().putBoolean("acc_mode", v).apply(); }
+              static int pollMs(Context c) { return Math.max(2, Math.min(90, sp(c).getInt("poll_ms", 10))); }
+              static void setPollMs(Context c, int v) { sp(c).edit().putInt("poll_ms", v).apply(); }
 
               static String hash(String s) {
                   try {
@@ -478,7 +480,7 @@ jobs:
                       long next = 1000;
                       if (!(Prefs.accMode(LockService.this) && LockAccessibility.connected)) {
                           try { poll(); } catch (Exception ignored) { }
-                          next = 10;
+                          next = Prefs.pollMs(LockService.this);
                       } else {
                           last = System.currentTimeMillis();
                       }
@@ -809,21 +811,19 @@ jobs:
 
               private void prompt(final boolean face) {
                   if (prompting) return;
-                  int auth = face ? BiometricManager.Authenticators.BIOMETRIC_WEAK
-                          : BiometricManager.Authenticators.BIOMETRIC_STRONG;
+                  int auth = BiometricManager.Authenticators.BIOMETRIC_WEAK;
                   int can = BiometricManager.from(getContext()).canAuthenticate(auth);
                   if (can != BiometricManager.BIOMETRIC_SUCCESS) {
                       showPattern();
-                      status.setText(face
-                              ? "تشخیص چهره در این دستگاه فعال یا پشتیبانی نمی‌شود؛ الگو را بکشید"
-                              : "اثر انگشت ثبت نشده یا پشتیبانی نمی‌شود؛ الگو را بکشید");
+                      status.setText("چهره یا اثر انگشتی ثبت نشده یا پشتیبانی نمی‌شود؛ الگو را بکشید");
                       return;
                   }
                   BiometricPrompt.PromptInfo info = new BiometricPrompt.PromptInfo.Builder()
                           .setTitle(self ? "ورود به قفل برنامه" : "باز کردن " + label)
-                          .setSubtitle(face ? "چهره خود را نشان دهید" : "انگشت خود را روی حسگر بگذارید")
+                          .setSubtitle("چهره، اثر انگشت یا الگو")
                           .setNegativeButtonText("استفاده از الگو")
                           .setAllowedAuthenticators(auth)
+                          .setConfirmationRequired(!face)
                           .build();
                   prompting = true;
                   new BiometricPrompt(act, ContextCompat.getMainExecutor(act),
@@ -1027,6 +1027,7 @@ jobs:
           import android.widget.AdapterView;
           import android.widget.CheckBox;
           import android.widget.EditText;
+          import android.widget.SeekBar;
           import android.widget.ImageView;
           import android.widget.LinearLayout;
           import android.widget.TextView;
@@ -1389,6 +1390,7 @@ jobs:
                           "روش ورود به همین برنامه: " + Prefs.METHODS[Prefs.selfMethod(this)],
                           "قفل ورود به همین برنامه: " + (Prefs.selfLock(this) ? "روشن" : "خاموش"),
                           "حالت دسترس‌پذیری (باز شدن سریع‌تر): " + (Prefs.accMode(this) ? "روشن" : "خاموش"),
+                          "زمان بررسی باز شدن اپ‌ها: " + Prefs.pollMs(this) + " میلی‌ثانیه",
                           "تغییر الگو",
                           "پشتیبان",
                           "بررسی دسترسی‌ها"
@@ -1410,8 +1412,9 @@ jobs:
                                   asked = false;
                                   toast(nv ? "حالت دسترس‌پذیری روشن شد" : "حالت دسترس‌پذیری خاموش شد");
                                   refreshPerms();
-                              } else if (w == 4) patternSetup(true);
-                                  else if (w == 5) backupDialog();
+                              } else if (w == 4) pollDialog();
+                                  else if (w == 5) patternSetup(true);
+                                  else if (w == 6) backupDialog();
                                   else {
                                       asked = false;
                                       if (Settings.canDrawOverlays(MainActivity.this) && (Prefs.accMode(MainActivity.this) ? Prefs.accEnabled(MainActivity.this) : Prefs.hasUsage(MainActivity.this))) {
@@ -1422,6 +1425,40 @@ jobs:
                                   }
                               }
                           })
+                          .show();
+              }
+
+              private void pollDialog() {
+                  LinearLayout box = new LinearLayout(this);
+                  box.setOrientation(LinearLayout.VERTICAL);
+                  box.setPadding(dp(24), dp(16), dp(24), dp(8));
+                  final TextView t = new TextView(this);
+                  t.setGravity(Gravity.CENTER);
+                  t.setTextSize(18);
+                  t.setText(Prefs.pollMs(this) + " میلی‌ثانیه");
+                  final SeekBar sb = new SeekBar(this);
+                  sb.setMax(88);
+                  sb.setProgress(Prefs.pollMs(this) - 2);
+                  sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override public void onProgressChanged(SeekBar s, int p, boolean user) {
+                          int ms = p + 2;
+                          t.setText(ms + " میلی‌ثانیه");
+                          Prefs.setPollMs(MainActivity.this, ms);
+                      }
+                      @Override public void onStartTrackingTouch(SeekBar s) { }
+                      @Override public void onStopTrackingTouch(SeekBar s) { }
+                  });
+                  TextView note = new TextView(this);
+                  note.setText("اهرم را بکشید تا فاصله زمانی بررسی بین ۲ تا ۹۰ میلی‌ثانیه تغییر کند. عدد کمتر یعنی تشخیص سریع‌تر ولی مصرف باتری و پردازنده بیشتر. این تنظیم فقط وقتی «حالت دسترس‌پذیری» خاموش است اثر دارد.");
+                  note.setTextSize(12);
+                  note.setPadding(0, dp(12), 0, 0);
+                  box.addView(t);
+                  box.addView(sb);
+                  box.addView(note);
+                  new AlertDialog.Builder(this)
+                          .setTitle("زمان بررسی باز شدن اپ‌ها")
+                          .setView(box)
+                          .setPositiveButton("تأیید", null)
                           .show();
               }
 
