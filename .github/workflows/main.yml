@@ -221,6 +221,18 @@ jobs:
                           <action android:name="android.intent.action.BOOT_COMPLETED" />
                       </intent-filter>
                   </receiver>
+
+                  <receiver
+                      android:name=".AdminReceiver"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_DEVICE_ADMIN">
+                      <meta-data
+                          android:name="android.app.device_admin"
+                          android:resource="@xml/device_admin" />
+                      <intent-filter>
+                          <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+                      </intent-filter>
+                  </receiver>
               </application>
           </manifest>
           EOF
@@ -292,6 +304,44 @@ jobs:
               static void setAccMode(Context c, boolean v) { sp(c).edit().putBoolean("acc_mode", v).apply(); }
               static int pollMs(Context c) { return Math.max(2, Math.min(90, sp(c).getInt("poll_ms", 10))); }
               static void setPollMs(Context c, int v) { sp(c).edit().putInt("poll_ms", v).apply(); }
+
+              // ---------- feature locks (internet, install, uninstall, downloads) ----------
+              static final String[] FEAT_KEYS = {"net", "install", "uninstall", "dl_app", "dl_video", "dl_music", "dl_image"};
+              static final String[] FEAT_NAMES = {
+                      "روشن کردن اینترنت (وای‌فای و داده)",
+                      "نصب برنامه‌ها",
+                      "حذف نصب برنامه‌ها",
+                      "دانلود برنامه‌ها",
+                      "دانلود ویدیوها",
+                      "دانلود موزیک‌ها",
+                      "دانلود تصاویر"
+              };
+              static final String[] FEAT_TITLES = {
+                      "روشن کردن اینترنت", "نصب برنامه", "حذف نصب برنامه",
+                      "دانلود برنامه", "دانلود ویدیو", "دانلود موزیک", "دانلود تصویر"
+              };
+
+              static boolean feat(Context c, String k) { return sp(c).getBoolean("feat_" + k, false); }
+              static void setFeat(Context c, String k, boolean v) { sp(c).edit().putBoolean("feat_" + k, v).apply(); }
+              static boolean protectSelf(Context c) { return sp(c).getBoolean("protect_self", false); }
+              static void setProtectSelf(Context c, boolean v) { sp(c).edit().putBoolean("protect_self", v).apply(); }
+
+              static boolean anyDl(Context c) {
+                  return feat(c, "dl_app") || feat(c, "dl_video") || feat(c, "dl_music") || feat(c, "dl_image");
+              }
+
+              static boolean anyFeat(Context c) {
+                  for (String k : FEAT_KEYS) if (feat(c, k)) return true;
+                  return protectSelf(c);
+              }
+
+              static String featTitle(String key) {
+                  String k = key.startsWith("feat:") ? key.substring(5) : key;
+                  for (int i = 0; i < FEAT_KEYS.length; i++) if (FEAT_KEYS[i].equals(k)) return FEAT_TITLES[i];
+                  if (k.equals("dl_any")) return "دانلود";
+                  if (k.equals("admin")) return "تنظیمات مدیر دستگاه";
+                  return k;
+              }
 
               static String hash(String s) {
                   try {
@@ -624,6 +674,32 @@ jobs:
                   c.startActivity(i);
               }
 
+              private static final java.util.HashMap<String, Long> ALLOW = new java.util.HashMap<>();
+
+              static void allow(String key, long ms) {
+                  ALLOW.put(key, SystemClock.uptimeMillis() + ms);
+              }
+
+              static boolean allowed(String key) {
+                  Long t = ALLOW.get(key);
+                  return t != null && SystemClock.uptimeMillis() < t.longValue();
+              }
+
+              // Asks for authentication before a locked feature (install, uninstall, internet, download...) can be used.
+              static void gate(Context c, String key) {
+                  if (allowed(key)) return;
+                  if (key.equals(lockPkg)) return;
+                  long now = SystemClock.uptimeMillis();
+                  if (key.equals(lastPkg) && now - lastAt < 500) return;
+                  lastPkg = key;
+                  lastAt = now;
+                  showCover(c, key);
+                  Intent i = new Intent(c, LockActivity.class)
+                          .putExtra("pkg", key)
+                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                  c.startActivity(i);
+              }
+
               static void showCover(Context c, String pkg) {
                   try {
                       int type;
@@ -639,11 +715,16 @@ jobs:
                       ImageView ic = new ImageView(c);
                       TextView t = new TextView(c);
                       String label = pkg;
-                      try {
-                          PackageManager pm = c.getPackageManager();
-                          label = pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString();
-                          ic.setImageDrawable(pm.getApplicationIcon(pkg));
-                      } catch (Exception ignored) { }
+                      if (pkg.startsWith("feat:")) {
+                          label = Prefs.featTitle(pkg);
+                          ic.setImageResource(android.R.drawable.ic_lock_lock);
+                      } else {
+                          try {
+                              PackageManager pm = c.getPackageManager();
+                              label = pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString();
+                              ic.setImageDrawable(pm.getApplicationIcon(pkg));
+                          } catch (Exception ignored) { }
+                      }
                       t.setText(label + " قفل است");
                       t.setTextColor(0xFFFFFFFF);
                       t.setTextSize(20);
@@ -852,31 +933,398 @@ jobs:
           package com.applock.pro;
 
           import android.accessibilityservice.AccessibilityService;
+          import android.accessibilityservice.AccessibilityServiceInfo;
           import android.content.Intent;
+          import android.graphics.PixelFormat;
+          import android.graphics.Rect;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.WindowManager;
           import android.view.accessibility.AccessibilityEvent;
+          import android.view.accessibility.AccessibilityNodeInfo;
+
+          import java.util.ArrayList;
+          import java.util.Arrays;
+          import java.util.List;
 
           public class LockAccessibility extends AccessibilityService {
               static volatile boolean connected = false;
+              static LockAccessibility inst = null;
 
+              private static class Hit {
+                  Rect r;
+                  String key;
+              }
+
+              // Stores whose Install / Update buttons are covered by the "install" lock.
+              private static final List<String> STORES = Arrays.asList(
+                      "com.android.vending", "com.farsitel.bazaar", "ir.mservices.market",
+                      "com.sec.android.app.samsungapps", "com.xiaomi.mipicks", "com.xiaomi.market",
+                      "com.huawei.appmarket", "com.aurora.store", "org.fdroid.fdroid");
+
+              // All word lists are normalized (lower case, no spaces / hyphens / ZWNJ) by norm().
+              private static final String[] NET = norm("wi-fi", "wifi", "وای‌فای", "internet", "اینترنت", "mobile data",
+                      "cellular data", "داده تلفن همراه", "داده همراه", "داده موبایل", "airplane", "flight mode", "حالت پرواز");
+              private static final String[] SET_NET = norm("wi-fi", "wifi", "وای‌فای", "internet", "اینترنت", "mobile network",
+                      "mobile data", "data usage", "شبکه تلفن همراه", "مصرف داده", "airplane", "flight mode", "حالت پرواز",
+                      "connections", "اتصالات");
+              private static final String[] ADMIN = norm("device admin", "مدیر دستگاه", "مدیران دستگاه");
+              private static final String[] STORE_BTN = norm("install", "update", "get", "download",
+                      "نصب", "به‌روزرسانی", "بروزرسانی", "دریافت", "دانلود");
+              private static final String[] IMG = norm("download image", "save image", "download photo", "save photo",
+                      "download picture", "ذخیره تصویر", "دانلود تصویر", "ذخیره عکس", "دانلود عکس");
+              private static final String[] VID = norm("download video", "save video", "دانلود ویدیو", "دانلود ویدئو",
+                      "دانلود فیلم", "ذخیره ویدیو", "ذخیره فیلم");
+              private static final String[] MUS = norm("download audio", "download music", "download song", "save audio",
+                      "save to music", "دانلود موزیک", "دانلود آهنگ", "دانلود صوت", "ذخیره آهنگ", "ذخیره صوت");
+              private static final String[] APP = norm("download app", "download apk", "دانلود برنامه", "دانلود اپ", "دانلود apk");
+              private static final String[] GEN = norm("download", "download file", "download link", "save to gallery",
+                      "save to downloads", "دانلود", "دانلود فایل", "دانلود لینک", "ذخیره در گالری", "ذخیره در دانلودها");
+
+              private final Handler h = new Handler(Looper.getMainLooper());
+              private final List<View> shields = new ArrayList<>();
+              private String shieldSig = "";
+              private String watchPkg = "";
+              private boolean scheduled = false;
+              private volatile boolean featOn = false;
+
+              private final Runnable scan = new Runnable() {
+                  @Override public void run() {
+                      try { doScan(); } catch (Exception ignored) { }
+                  }
+              };
+              private final Runnable keep = new Runnable() {
+                  @Override public void run() {
+                      try { doScan(); } catch (Exception ignored) { }
+                  }
+              };
+
+              // ---------- helpers ----------
+              private static String squash(CharSequence cs) {
+                  if (cs == null) return "";
+                  String s = cs.toString().toLowerCase();
+                  StringBuilder b = new StringBuilder();
+                  for (int i = 0; i < s.length(); i++) {
+                      char ch = s.charAt(i);
+                      if (Character.isWhitespace(ch) || ch == '\u200c' || ch == '\u200e' || ch == '\u200f'
+                              || ch == '\u00a0' || ch == '-' || ch == '_' || ch == '\u2010' || ch == '\u2011'
+                              || ch == '\u2012' || ch == '\u2013') continue;
+                      if (ch == '\u064a') ch = '\u06cc';
+                      else if (ch == '\u0643') ch = '\u06a9';
+                      b.append(ch);
+                  }
+                  return b.toString();
+              }
+
+              private static String[] norm(String... a) {
+                  String[] r = new String[a.length];
+                  for (int i = 0; i < a.length; i++) r[i] = squash(a[i]);
+                  return r;
+              }
+
+              private static boolean hasAny(String s, String[] a) {
+                  for (String k : a) if (!k.isEmpty() && s.contains(k)) return true;
+                  return false;
+              }
+
+              private static boolean startsAny(String s, String[] a) {
+                  for (String k : a) if (!k.isEmpty() && s.startsWith(k)) return true;
+                  return false;
+              }
+
+              private static boolean inList(String s, String[] a) {
+                  for (String k : a) if (k.equals(s)) return true;
+                  return false;
+              }
+
+              // ---------- service lifecycle ----------
               @Override protected void onServiceConnected() {
                   super.onServiceConnected();
                   connected = true;
+                  inst = this;
+                  applyConfig();
               }
 
               @Override public boolean onUnbind(Intent i) {
                   connected = false;
+                  inst = null;
+                  h.removeCallbacksAndMessages(null);
+                  clearShields();
                   return super.onUnbind(i);
               }
 
+              // Called from the settings screen when a feature lock is switched on or off.
+              static void reconfig() {
+                  LockAccessibility s = inst;
+                  if (s != null) s.applyConfig();
+              }
+
+              private void applyConfig() {
+                  featOn = Prefs.anyFeat(this);
+                  try {
+                      AccessibilityServiceInfo info = getServiceInfo();
+                      if (info != null) {
+                          int types = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
+                          if (featOn) {
+                              types |= AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED | AccessibilityEvent.TYPE_VIEW_SCROLLED;
+                          }
+                          info.eventTypes = types;
+                          setServiceInfo(info);
+                      }
+                  } catch (Exception ignored) { }
+                  if (!featOn) clearShields();
+              }
+
+              // ---------- events ----------
               @Override public void onAccessibilityEvent(AccessibilityEvent e) {
-                  if (e == null || e.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
-                  if (!Prefs.accMode(this)) return;
+                  if (e == null) return;
                   CharSequence p = e.getPackageName();
                   if (p == null) return;
-                  Guard.onFg(this, p.toString());
+                  String pkg = p.toString();
+                  int t = e.getEventType();
+                  if (t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                      if (featOn) {
+                          if (pkg.equals(getPackageName())) {
+                              clearShields();
+                          } else {
+                              try { checkWindow(pkg, e); } catch (Exception ignored) { }
+                              requestScan(pkg);
+                          }
+                      }
+                      if (!Prefs.accMode(this)) return;
+                      Guard.onFg(this, pkg);
+                  } else if (featOn && (t == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                          || t == AccessibilityEvent.TYPE_VIEW_SCROLLED)) {
+                      if (!pkg.equals(getPackageName())) requestScan(pkg);
+                  }
               }
 
               @Override public void onInterrupt() { }
+
+              // Whole-screen gates: package installer (install / uninstall), network settings, device-admin settings.
+              private void checkWindow(String pkg, AccessibilityEvent e) {
+                  String cls = squash(e.getClassName());
+                  if (pkg.contains("packageinstaller")) {
+                      if (!Prefs.feat(this, "install") && !Prefs.feat(this, "uninstall")) return;
+                      if (cls.contains("uninstall")) {
+                          if (Prefs.feat(this, "uninstall")) Guard.gate(this, "feat:uninstall");
+                      } else if (cls.contains("install")) {
+                          if (Prefs.feat(this, "install")) Guard.gate(this, "feat:install");
+                      } else {
+                          checkInstaller(0);
+                      }
+                      return;
+                  }
+                  if (pkg.equals("com.android.settings")) {
+                      StringBuilder sb = new StringBuilder(cls);
+                      for (CharSequence c : e.getText()) sb.append('|').append(squash(c));
+                      sb.append('|').append(squash(e.getContentDescription()));
+                      String all = sb.toString();
+                      if (Prefs.protectSelf(this) && (all.contains("deviceadmin") || hasAny(all, ADMIN))) {
+                          Guard.gate(this, "feat:admin");
+                          return;
+                      }
+                      if (Prefs.feat(this, "net") && hasAny(all, SET_NET)) Guard.gate(this, "feat:net");
+                  }
+              }
+
+              // Some systems report a dialog class name, so the installer window is classified by its text.
+              private void checkInstaller(final int attempt) {
+                  String kind = kindFromWindow();
+                  if (kind == null) return;
+                  if (kind.equals("u")) {
+                      if (Prefs.feat(this, "uninstall")) Guard.gate(this, "feat:uninstall");
+                  } else if (kind.equals("i")) {
+                      if (Prefs.feat(this, "install")) Guard.gate(this, "feat:install");
+                  } else if (attempt < 3) {
+                      h.postDelayed(new Runnable() {
+                          @Override public void run() { checkInstaller(attempt + 1); }
+                      }, 300);
+                  }
+              }
+
+              private String kindFromWindow() {
+                  AccessibilityNodeInfo root = getRootInActiveWindow();
+                  if (root == null) return "";
+                  CharSequence rp = root.getPackageName();
+                  if (rp == null || !rp.toString().contains("packageinstaller")) return null;
+                  StringBuilder sb = new StringBuilder();
+                  gather(root, sb, new int[]{150});
+                  String s = sb.toString();
+                  if (s.contains("uninstall") || s.contains("حذف")) return "u";
+                  if (s.contains("install") || s.contains("update") || s.contains("نصب")
+                          || s.contains("بهروزرسانی") || s.contains("بروزرسانی")) return "i";
+                  return "";
+              }
+
+              private void gather(AccessibilityNodeInfo n, StringBuilder sb, int[] budget) {
+                  if (n == null || budget[0] <= 0) return;
+                  budget[0]--;
+                  sb.append(squash(n.getText())).append('|').append(squash(n.getContentDescription())).append('|');
+                  int c = n.getChildCount();
+                  for (int i = 0; i < c; i++) gather(n.getChild(i), sb, budget);
+              }
+
+              // ---------- button shields (internet tiles, store install buttons, download buttons) ----------
+              private void requestScan(String pkg) {
+                  watchPkg = pkg;
+                  if (scheduled) return;
+                  scheduled = true;
+                  h.postDelayed(scan, 120);
+              }
+
+              private void doScan() {
+                  scheduled = false;
+                  if (!featOn) {
+                      clearShields();
+                      return;
+                  }
+                  AccessibilityNodeInfo root = getRootInActiveWindow();
+                  if (root == null) {
+                      clearShields();
+                      return;
+                  }
+                  String pkg = String.valueOf(root.getPackageName());
+                  boolean sys = pkg.equals("com.android.systemui");
+                  boolean store = STORES.contains(pkg);
+                  boolean dl = Prefs.anyDl(this);
+                  boolean use;
+                  if (pkg.equals(getPackageName()) || pkg.equals("com.android.settings")) use = false;
+                  else if (sys) use = Prefs.feat(this, "net");
+                  else if (store) use = dl || Prefs.feat(this, "install");
+                  else use = dl;
+
+                  List<Hit> hits = new ArrayList<>();
+                  if (use) {
+                      int sh = getResources().getDisplayMetrics().heightPixels;
+                      collect(root, sys, store, new int[]{600}, hits, sh);
+                  }
+                  StringBuilder sig = new StringBuilder();
+                  for (Hit ht : hits) sig.append(ht.key).append(ht.r.flattenToString()).append(';');
+                  String s = sig.toString();
+                  if (!s.equals(shieldSig) || (!hits.isEmpty() && shields.isEmpty())) {
+                      clearShields();
+                      for (Hit ht : hits) {
+                          try { addShield(ht); } catch (Exception ignored) { }
+                      }
+                      shieldSig = s;
+                  }
+                  if (!shields.isEmpty()) {
+                      h.removeCallbacks(keep);
+                      h.postDelayed(keep, 1000);
+                  }
+              }
+
+              private void collect(AccessibilityNodeInfo n, boolean sys, boolean store, int[] budget, List<Hit> out, int sh) {
+                  if (n == null || budget[0] <= 0) return;
+                  budget[0]--;
+                  if (n.isVisibleToUser()) {
+                      String key = sys ? netKey(n) : dlKey(n, store);
+                      if (key != null && !Guard.allowed(key)) {
+                          AccessibilityNodeInfo c = clickableOf(n);
+                          if (c != null) {
+                              Rect r = new Rect();
+                              c.getBoundsInScreen(r);
+                              if (r.width() > 8 && r.height() > 8 && r.height() < sh * 0.4f) {
+                                  boolean dup = false;
+                                  for (Hit o : out) if (o.r.equals(r)) dup = true;
+                                  if (!dup) {
+                                      Hit ht = new Hit();
+                                      ht.r = r;
+                                      ht.key = key;
+                                      out.add(ht);
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  int cnt = n.getChildCount();
+                  for (int i = 0; i < cnt && budget[0] > 0; i++) collect(n.getChild(i), sys, store, budget, out, sh);
+              }
+
+              private AccessibilityNodeInfo clickableOf(AccessibilityNodeInfo n) {
+                  AccessibilityNodeInfo c = n;
+                  for (int i = 0; i < 5 && c != null; i++) {
+                      if (c.isClickable()) return c;
+                      c = c.getParent();
+                  }
+                  return null;
+              }
+
+              private String netKey(AccessibilityNodeInfo n) {
+                  if (!Prefs.feat(this, "net")) return null;
+                  String a = squash(n.getText());
+                  String b = squash(n.getContentDescription());
+                  if (startsAny(a, NET) || startsAny(b, NET)) return "feat:net";
+                  return null;
+              }
+
+              private String dlKey(AccessibilityNodeInfo n, boolean store) {
+                  String k = keyFor(squash(n.getText()), store);
+                  if (k == null) k = keyFor(squash(n.getContentDescription()), store);
+                  return k;
+              }
+
+              private String keyFor(String s, boolean store) {
+                  if (s.isEmpty() || s.length() > 60) return null;
+                  if (store && inList(s, STORE_BTN)) {
+                      if (Prefs.feat(this, "install")) return "feat:install";
+                      if (Prefs.feat(this, "dl_app")) return "feat:dl_app";
+                  }
+                  if (startsAny(s, IMG)) return Prefs.feat(this, "dl_image") ? "feat:dl_image" : null;
+                  if (startsAny(s, VID)) return Prefs.feat(this, "dl_video") ? "feat:dl_video" : null;
+                  if (startsAny(s, MUS)) return Prefs.feat(this, "dl_music") ? "feat:dl_music" : null;
+                  if (startsAny(s, APP)) return Prefs.feat(this, "dl_app") ? "feat:dl_app" : null;
+                  if (inList(s, GEN)) return Prefs.anyDl(this) ? "feat:dl_any" : null;
+                  return null;
+              }
+
+              private void addShield(Hit ht) {
+                  final String key = ht.key;
+                  View v = new View(this);
+                  v.setBackgroundColor(0x22FF9800);
+                  v.setOnTouchListener(new View.OnTouchListener() {
+                      @Override public boolean onTouch(View view, MotionEvent ev) {
+                          if (ev.getAction() == MotionEvent.ACTION_UP) {
+                              h.post(new Runnable() {
+                                  @Override public void run() {
+                                      clearShields();
+                                      if (Guard.allowed(key)) requestScan(watchPkg);
+                                      else Guard.gate(LockAccessibility.this, key);
+                                  }
+                              });
+                          }
+                          return true;
+                      }
+                  });
+                  WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                          ht.r.width(), ht.r.height(),
+                          WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                  | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                                  | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                          PixelFormat.TRANSLUCENT);
+                  lp.gravity = Gravity.TOP | Gravity.START;
+                  lp.x = ht.r.left;
+                  lp.y = ht.r.top;
+                  WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                  wm.addView(v, lp);
+                  shields.add(v);
+              }
+
+              private void clearShields() {
+                  h.removeCallbacks(keep);
+                  shieldSig = "";
+                  if (shields.isEmpty()) return;
+                  WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                  for (View v : shields) {
+                      try { wm.removeView(v); } catch (Exception ignored) { }
+                  }
+                  shields.clear();
+              }
           }
           EOF
 
@@ -886,15 +1334,38 @@ jobs:
               android:accessibilityEventTypes="typeWindowStateChanged"
               android:accessibilityFeedbackType="feedbackGeneric"
               android:accessibilityFlags="flagDefault"
-              android:canRetrieveWindowContent="false"
+              android:canRetrieveWindowContent="true"
               android:description="@string/acc_desc"
               android:notificationTimeout="0" />
+          EOF
+
+          cat > app/src/main/res/xml/device_admin.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-policies>
+                  <force-lock />
+              </uses-policies>
+          </device-admin>
+          EOF
+
+          cat > app/src/main/java/com/applock/pro/AdminReceiver.java << 'EOF'
+          package com.applock.pro;
+
+          import android.app.admin.DeviceAdminReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+
+          public class AdminReceiver extends DeviceAdminReceiver {
+              @Override public CharSequence onDisableRequested(Context context, Intent intent) {
+                  return "با غیرفعال کردن این گزینه، حذف «قفل برنامه» ممکن می‌شود.";
+              }
+          }
           EOF
 
           cat > app/src/main/res/values/strings.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
-              <string name="acc_desc">برای باز شدن فوری صفحه قفل هنگام باز کردن برنامه‌های قفل‌شده استفاده می‌شود. هیچ اطلاعاتی خوانده یا ذخیره نمی‌شود.</string>
+              <string name="acc_desc">برای باز شدن فوری صفحه قفل هنگام باز کردن برنامه‌های قفل‌شده، و برای قفل کردن گزینه‌های ویژه (اینترنت، نصب و حذف برنامه، دانلود) استفاده می‌شود. هیچ اطلاعاتی ذخیره یا ارسال نمی‌شود.</string>
           </resources>
           EOF
 
@@ -958,11 +1429,16 @@ jobs:
                   if (pkg == null) pkg = "";
                   String label = pkg;
                   Drawable ic = null;
-                  try {
-                      PackageManager pm = getPackageManager();
-                      label = pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString();
-                      ic = pm.getApplicationIcon(pkg);
-                  } catch (Exception ignored) { }
+                  if (pkg.startsWith("feat:")) {
+                      label = Prefs.featTitle(pkg);
+                      ic = getResources().getDrawable(android.R.drawable.ic_lock_lock, getTheme());
+                  } else {
+                      try {
+                          PackageManager pm = getPackageManager();
+                          label = pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString();
+                          ic = pm.getApplicationIcon(pkg);
+                      } catch (Exception ignored) { }
+                  }
                   panel.bind(label, ic);
                   panel.start();
               }
@@ -996,7 +1472,8 @@ jobs:
               }
 
               private void success() {
-                  Guard.unlocked = pkg;
+                  if (pkg.startsWith("feat:")) Guard.allow(pkg, 90000);
+                  else Guard.unlocked = pkg;
                   Guard.lockPkg = null;
                   finish();
               }
@@ -1007,6 +1484,8 @@ jobs:
           package com.applock.pro;
 
           import android.Manifest;
+          import android.app.admin.DevicePolicyManager;
+          import android.content.ComponentName;
           import android.content.DialogInterface;
           import android.content.Intent;
           import android.content.pm.PackageManager;
@@ -1324,7 +1803,7 @@ jobs:
                   if (banner == null) return;
                   boolean overlay = Settings.canDrawOverlays(this);
                   boolean acc = Prefs.accEnabled(this);
-                  boolean ok = overlay && (Prefs.accMode(this) ? acc : Prefs.hasUsage(this));
+                  boolean ok = overlay && (Prefs.accMode(this) ? acc : Prefs.hasUsage(this)) && (!Prefs.anyFeat(this) || acc);
                   banner.setVisibility(ok ? View.GONE : View.VISIBLE);
                   if (overlay && (acc || Prefs.hasUsage(this)) && !LockService.running) {
                       startForegroundService(new Intent(this, LockService.class));
@@ -1361,9 +1840,9 @@ jobs:
                                   startActivity(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS));
                               }
                           });
-              } else if (Prefs.accMode(this) && !Prefs.accEnabled(this)) {
+              } else if ((Prefs.accMode(this) || Prefs.anyFeat(this)) && !Prefs.accEnabled(this)) {
                       ask("سرویس دسترسی‌پذیری",
-                              "برای اینکه صفحه قفل بدون هیچ تأخیری و قبل از دیده شدن برنامه باز شود، این سرویس لازم است. در صفحه بعد «قفل برنامه» را پیدا و روشن کنید. هیچ اطلاعاتی خوانده یا ذخیره نمی‌شود.\n\nاگر گزینه خاکستری بود: تنظیمات گوشی > برنامه‌ها > قفل برنامه > منوی ⋮ بالا > «اجازه تنظیمات محدودشده» را بزنید و دوباره تلاش کنید.",
+                              "برای اینکه صفحه قفل بدون هیچ تأخیری و قبل از دیده شدن برنامه باز شود، این سرویس لازم است. در صفحه بعد «قفل برنامه» را پیدا و روشن کنید. هیچ اطلاعاتی ذخیره یا ارسال نمی‌شود.\n\nاگر گزینه خاکستری بود: تنظیمات گوشی > برنامه‌ها > قفل برنامه > منوی ⋮ بالا > «اجازه تنظیمات محدودشده» را بزنید و دوباره تلاش کنید.",
                               new Runnable() {
                                   @Override public void run() {
                                       leaving = true;
@@ -1433,6 +1912,13 @@ jobs:
                       }
                   });
 
+                  addRow(box, dlg, "قفل‌های ویژه (اینترنت، نصب، حذف، دانلود)", new Runnable() {
+                      @Override public void run() { featuresDialog(); }
+                  });
+                  addRow(box, dlg, "جلوگیری از حذف خود برنامه: " + (protectOn() ? "روشن" : "خاموش"), new Runnable() {
+                      @Override public void run() { toggleProtect(); }
+                  });
+
                   // slider: check interval 2..90 ms
                   final TextView pt = new TextView(this);
                   pt.setText("زمان بررسی باز شدن اپ‌ها: " + Prefs.pollMs(this) + " میلی‌ثانیه");
@@ -1488,6 +1974,59 @@ jobs:
                           .setNegativeButton("بستن", null)
                           .create();
                   dlg[0].show();
+              }
+
+              // ---------- feature locks ----------
+              private void featuresDialog() {
+                  final boolean[] on = new boolean[Prefs.FEAT_KEYS.length];
+                  for (int i = 0; i < on.length; i++) on[i] = Prefs.feat(this, Prefs.FEAT_KEYS[i]);
+                  new AlertDialog.Builder(this)
+                          .setTitle("قفل‌های ویژه")
+                          .setMultiChoiceItems(Prefs.FEAT_NAMES, on, new DialogInterface.OnMultiChoiceClickListener() {
+                              @Override public void onClick(DialogInterface d, int w, boolean c) {
+                                  on[w] = c;
+                                  Prefs.setFeat(MainActivity.this, Prefs.FEAT_KEYS[w], c);
+                                  LockAccessibility.reconfig();
+                              }
+                          })
+                          .setPositiveButton("تأیید", new DialogInterface.OnClickListener() {
+                              @Override public void onClick(DialogInterface d, int w) {
+                                  asked = false;
+                                  refreshPerms();
+                              }
+                          })
+                          .show();
+              }
+
+              private boolean adminActive() {
+                  DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(DEVICE_POLICY_SERVICE);
+                  return dpm != null && dpm.isAdminActive(new ComponentName(this, AdminReceiver.class));
+              }
+
+              private boolean protectOn() {
+                  return Prefs.protectSelf(this) && adminActive();
+              }
+
+              private void toggleProtect() {
+                  ComponentName cn = new ComponentName(this, AdminReceiver.class);
+                  DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(DEVICE_POLICY_SERVICE);
+                  if (dpm == null) {
+                      toast("این گوشی از این قابلیت پشتیبانی نمی‌کند");
+                      return;
+                  }
+                  if (dpm.isAdminActive(cn)) {
+                      try { dpm.removeActiveAdmin(cn); } catch (Exception ignored) { }
+                      Prefs.setProtectSelf(this, false);
+                      LockAccessibility.reconfig();
+                      toast("جلوگیری از حذف خاموش شد");
+                  } else {
+                      leaving = true;
+                      Intent i = new Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN);
+                      i.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, cn);
+                      i.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                              "با فعال شدن این گزینه، «قفل برنامه» قابل حذف نیست؛ مگر اینکه ابتدا این گزینه را خاموش کنید.");
+                      startActivityForResult(i, 104);
+                  }
               }
 
               private void pickMethod(final boolean self) {
@@ -1559,6 +2098,7 @@ jobs:
                   o.put("app_method", Prefs.appMethod(this));
                   o.put("self_method", Prefs.selfMethod(this));
                   o.put("self_lock", Prefs.selfLock(this));
+                  for (String k : Prefs.FEAT_KEYS) o.put("feat_" + k, Prefs.feat(this, k));
                   return o.toString(2);
               }
 
@@ -1579,6 +2119,8 @@ jobs:
                           .putInt("self_method", o.optInt("self_method", 0))
                           .putBoolean("self_lock", o.optBoolean("self_lock", true))
                           .apply();
+                  for (String k : Prefs.FEAT_KEYS) Prefs.setFeat(this, k, o.optBoolean("feat_" + k, false));
+                  LockAccessibility.reconfig();
                   load();
               }
 
@@ -1743,6 +2285,13 @@ jobs:
 
               @Override protected void onActivityResult(int rc, int res, Intent data) {
                   super.onActivityResult(rc, res, data);
+                  if (rc == 104) {
+                      boolean ok = res == RESULT_OK && adminActive();
+                      Prefs.setProtectSelf(this, ok);
+                      LockAccessibility.reconfig();
+                      toast(ok ? "جلوگیری از حذف روشن شد" : "فعال‌سازی انجام نشد");
+                      return;
+                  }
                   if (res != RESULT_OK || data == null || data.getData() == null) {
                       pending = 0;
                       return;
