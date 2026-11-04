@@ -1493,6 +1493,7 @@ jobs:
           import android.database.Cursor;
           import android.graphics.Color;
           import android.graphics.drawable.Drawable;
+          import android.graphics.drawable.GradientDrawable;
           import android.net.Uri;
           import android.os.Build;
           import android.os.Bundle;
@@ -1513,6 +1514,7 @@ jobs:
           import android.widget.TextView;
           import android.widget.Toast;
 
+          import androidx.activity.OnBackPressedCallback;
           import androidx.appcompat.app.AlertDialog;
           import androidx.appcompat.app.AppCompatActivity;
           import androidx.core.content.ContextCompat;
@@ -1549,6 +1551,9 @@ jobs:
               private Adapter ad;
               private EditText search;
               private TextView banner, count;
+              private TextView chipLocked, chipFree;
+              private OnBackPressedCallback subBack;
+              private boolean subOpen = false;
 
               static class Item {
                   String pkg, label;
@@ -1568,6 +1573,8 @@ jobs:
               }
 
               private void showLock() {
+                  subOpen = false;
+                  if (subBack != null) subBack.setEnabled(false);
                   mainShown = false;
                   selfOk = false;
                   lockPanel = new LockPanel(this, true, new Runnable() {
@@ -1583,6 +1590,8 @@ jobs:
               }
 
               private void showMain() {
+                  subOpen = false;
+                  if (subBack != null) subBack.setEnabled(false);
                   lockPanel = null;
                   if (mainRoot == null) buildUi(); else setContentView(mainRoot);
                   boolean first = !mainShown;
@@ -1595,6 +1604,10 @@ jobs:
               @Override protected void onCreate(Bundle b) {
                   super.onCreate(b);
                   getWindow().getDecorView().setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+                  subBack = new OnBackPressedCallback(false) {
+                      @Override public void handleOnBackPressed() { closeSub(); }
+                  };
+                  getOnBackPressedDispatcher().addCallback(this, subBack);
                   if (needAuth()) showLock(); else showMain();
               }
 
@@ -1647,7 +1660,22 @@ jobs:
                   gear.setOnClickListener(new View.OnClickListener() {
                       @Override public void onClick(View v) { settingsDialog(); }
                   });
-                  head.addView(gear);
+                  chipFree = makeChip(0xFFECEFF1, 0xFF455A64);
+                  chipFree.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) { openSub(false); }
+                  });
+                  LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40));
+                  clp.setMargins(dp(4), 0, dp(4), 0);
+                  head.addView(chipFree, clp);
+                  chipLocked = makeChip(0xFFE3F2FD, 0xFF1565C0);
+                  chipLocked.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) { openSub(true); }
+                  });
+                  LinearLayout.LayoutParams clp2 = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40));
+                  clp2.setMargins(dp(4), 0, dp(4), 0);
+                  head.addView(chipLocked, clp2);
+                  gear.setGravity(Gravity.CENTER);
+                  head.addView(gear, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
                   root.addView(head);
 
                   banner = new TextView(this);
@@ -1743,6 +1771,150 @@ jobs:
                   int n = 0;
                   for (Item it : all) if (it.locked) n++;
                   count.setText("قفل‌شده: " + n + " از " + all.size() + " برنامه");
+                  if (chipLocked != null) chipLocked.setText("🔒 " + n);
+                  if (chipFree != null) chipFree.setText("🔓 " + (all.size() - n));
+              }
+
+              private TextView makeChip(int bg, int fg) {
+                  TextView t = new TextView(this);
+                  t.setTextSize(16);
+                  t.setTextColor(fg);
+                  t.setTypeface(null, android.graphics.Typeface.BOLD);
+                  t.setGravity(Gravity.CENTER);
+                  t.setPadding(dp(12), 0, dp(12), 0);
+                  t.setMinWidth(dp(56));
+                  GradientDrawable g = new GradientDrawable();
+                  g.setColor(bg);
+                  g.setCornerRadius(dp(12));
+                  t.setBackground(g);
+                  return t;
+              }
+
+              private void closeSub() {
+                  subOpen = false;
+                  if (subBack != null) subBack.setEnabled(false);
+                  if (mainRoot != null) setContentView(mainRoot);
+                  filter();
+              }
+
+              private void openSub(final boolean lockedMode) {
+                  final List<Item> sub = new ArrayList<>();
+                  for (Item it : all) if (it.locked == lockedMode) sub.add(it);
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setBackgroundColor(0xFFF5F7FA);
+
+                  LinearLayout head = new LinearLayout(this);
+                  head.setOrientation(LinearLayout.HORIZONTAL);
+                  head.setGravity(Gravity.CENTER_VERTICAL);
+                  head.setBackgroundColor(Color.WHITE);
+                  head.setPadding(dp(16), dp(14), dp(16), dp(14));
+                  TextView back = new TextView(this);
+                  back.setText("→");
+                  back.setTextSize(26);
+                  back.setTextColor(0xFF455A64);
+                  back.setGravity(Gravity.CENTER);
+                  back.setPadding(dp(8), 0, dp(8), 0);
+                  back.setOnClickListener(new View.OnClickListener() {
+                      @Override public void onClick(View v) { closeSub(); }
+                  });
+                  head.addView(back, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
+                  final TextView title = new TextView(this);
+                  title.setTextSize(20);
+                  title.setTextColor(0xFF1A1A1A);
+                  title.setTypeface(null, android.graphics.Typeface.BOLD);
+                  title.setPadding(dp(8), 0, 0, 0);
+                  head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  root.addView(head);
+
+                  final TextView empty = new TextView(this);
+                  empty.setText(lockedMode ? "هیچ برنامه‌ای قفل نشده است." : "همه برنامه‌ها قفل شده‌اند.");
+                  empty.setTextColor(0xFF78909C);
+                  empty.setTextSize(15);
+                  empty.setGravity(Gravity.CENTER);
+                  empty.setPadding(dp(16), dp(32), dp(16), dp(16));
+                  root.addView(empty);
+
+                  final Runnable upd = new Runnable() {
+                      @Override public void run() {
+                          title.setText((lockedMode ? "برنامه‌های قفل‌شده" : "برنامه‌های قفل‌نشده") + " (" + sub.size() + ")");
+                          empty.setVisibility(sub.isEmpty() ? View.VISIBLE : View.GONE);
+                      }
+                  };
+                  upd.run();
+
+                  RecyclerView rv = new RecyclerView(this);
+                  rv.setLayoutManager(new LinearLayoutManager(this));
+                  rv.setAdapter(new SubAdapter(sub, lockedMode, upd));
+                  root.addView(rv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                  subOpen = true;
+                  if (subBack != null) subBack.setEnabled(true);
+                  setContentView(root);
+              }
+
+              class SubAdapter extends RecyclerView.Adapter<SubAdapter.VH> {
+                  private final List<Item> data;
+                  private final boolean lockedMode;
+                  private final Runnable onChange;
+
+                  SubAdapter(List<Item> d, boolean m, Runnable r) { data = d; lockedMode = m; onChange = r; }
+
+                  class VH extends RecyclerView.ViewHolder {
+                      ImageView ic;
+                      TextView tv;
+                      CheckBox cb;
+                      VH(View v, ImageView i, TextView t, CheckBox c) {
+                          super(v);
+                          ic = i; tv = t; cb = c;
+                      }
+                  }
+
+                  @Override public VH onCreateViewHolder(ViewGroup p, int t) {
+                      LinearLayout row = new LinearLayout(MainActivity.this);
+                      row.setOrientation(LinearLayout.HORIZONTAL);
+                      row.setGravity(Gravity.CENTER_VERTICAL);
+                      row.setBackgroundColor(Color.WHITE);
+                      row.setPadding(dp(16), dp(10), dp(16), dp(10));
+                      RecyclerView.LayoutParams rlp = new RecyclerView.LayoutParams(
+                              ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                      rlp.bottomMargin = 2;
+                      row.setLayoutParams(rlp);
+                      ImageView ic = new ImageView(MainActivity.this);
+                      row.addView(ic, new LinearLayout.LayoutParams(dp(44), dp(44)));
+                      TextView tv = new TextView(MainActivity.this);
+                      tv.setTextSize(16);
+                      tv.setTextColor(0xFF1A1A1A);
+                      tv.setPadding(dp(12), 0, dp(12), 0);
+                      row.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                      CheckBox cb = new CheckBox(MainActivity.this);
+                      cb.setClickable(false);
+                      cb.setFocusable(false);
+                      row.addView(cb);
+                      return new VH(row, ic, tv, cb);
+                  }
+
+                  @Override public void onBindViewHolder(final VH h, int pos) {
+                      final Item it = data.get(pos);
+                      h.ic.setImageDrawable(it.icon);
+                      h.tv.setText(it.label);
+                      h.cb.setChecked(lockedMode);
+                      h.itemView.setOnClickListener(new View.OnClickListener() {
+                          @Override public void onClick(View v) {
+                              int p = h.getAdapterPosition();
+                              if (p == RecyclerView.NO_POSITION) return;
+                              it.locked = !lockedMode;
+                              Prefs.setLocked(MainActivity.this, it.pkg, it.locked);
+                              data.remove(p);
+                              notifyItemRemoved(p);
+                              updateCount();
+                              onChange.run();
+                          }
+                      });
+                  }
+
+                  @Override public int getItemCount() { return data.size(); }
               }
 
               class Adapter extends RecyclerView.Adapter<Adapter.VH> {
