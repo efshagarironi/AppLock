@@ -681,6 +681,8 @@ jobs:
               private static LockPanel spare;      // pre-built, ready to show instantly
               private static WindowManager panelWm;
               private static long shownAt = 0;
+              private static volatile String pendingPkg = null;
+              private static long pendingUntil = 0;
               private static Set<String> ime = new HashSet<>();
               private static long imeAt = 0;
 
@@ -781,6 +783,13 @@ jobs:
                   if (pkg.equals(c.getPackageName())) return;
                   if (pkg.equals("com.android.systemui") || pkg.equals("android")) return;
                   if (imePkgs(c).contains(pkg)) return;
+                  String pp = pendingPkg;
+                  if (pp != null) {
+                      // the lock was shown when the icon was tapped: launcher events during the launch animation must not remove it
+                      if (System.currentTimeMillis() > pendingUntil) pendingPkg = null;
+                      else if (pkg.equals(pp)) pendingPkg = null;
+                      else if (isHome(c, pkg) || systemish(pkg)) return;
+                  }
                   String u = unlocked;
                   if (u != null && !u.equals(pkg)) {
                       unlocked = null;
@@ -801,10 +810,36 @@ jobs:
                   showLock(c, pkg);
               }
 
+              // The person tapped the icon / recents card of a locked app: the lock appears before the app even starts.
+              static void preLock(Context c, String pkg) {
+                  if (pkg == null || pkg.equals(c.getPackageName())) return;
+                  if (!Prefs.locked(c).contains(pkg)) return;
+                  if (pkg.equals(unlocked)) return;
+                  if (panel != null) {
+                      if (pkg.equals(lockPkg)) return;
+                      removePanel();
+                  }
+                  showLock(c, pkg);
+                  if (panel == null) return;
+                  pendingPkg = pkg;
+                  pendingUntil = System.currentTimeMillis() + 2500;
+                  H.postDelayed(new Runnable() {
+                      @Override public void run() {
+                          // the app never started (the tap did not launch it): take the lock away again
+                          if (pendingPkg != null && System.currentTimeMillis() > pendingUntil && pendingPkg.equals(lockPkg)) {
+                              pendingPkg = null;
+                              removePanel();
+                          }
+                      }
+                  }, 2700);
+              }
+
               static void showLock(Context c, String pkg) {
                   // accessibility overlay: instant, needs no extra permission, sits above everything
-                  AccessibilityService acc = AppLockAccess.live ? AppLockAccess.instance : null;
-                  if (acc == null && !Settings.canDrawOverlays(c)) return;
+                  // normal overlay first (so the fingerprint dialog stays above it); accessibility overlay if not allowed
+                  boolean app = Settings.canDrawOverlays(c);
+                  AccessibilityService acc = (!app && AppLockAccess.live) ? AppLockAccess.instance : null;
+                  if (!app && acc == null) return;
                   try {
                       load(c.getPackageManager(), pkg);
                       LockPanel p = spare != null ? spare : newPanel(c);
@@ -830,7 +865,10 @@ jobs:
                       panelWm = wm;
                       lockPkg = pkg;
                       shownAt = System.currentTimeMillis();
-                      p.start();
+                      final LockPanel pp = p;
+                      H.postDelayed(new Runnable() {
+                          @Override public void run() { if (panel == pp) pp.start(); }
+                      }, 60);
                   } catch (Exception ignored) { }
               }
 
@@ -841,6 +879,7 @@ jobs:
                   panel = null;
                   panelWm = null;
                   lockPkg = null;
+                  pendingPkg = null;
                   if (p != null) p.cancelPrompt();
                   if (p != null && w != null) {
                       try { w.removeView(p); } catch (Exception ignored) { }
@@ -1082,68 +1121,6 @@ jobs:
                   row.setVisibility(View.VISIBLE);
               }
 
-              @android.annotation.SuppressLint("NewApi")
-              private void promptDirect() {
-                  // the pattern and the 3 buttons stay available while the system dialog is open
-                  row.setVisibility(View.VISIBLE);
-                  status.setText("اثر انگشت را روی حسگر بگذارید");
-                  if (android.os.Build.VERSION.SDK_INT < 28) {
-                      Guard.startBio(getContext(), label);
-                      prompting = true;
-                      return;
-                  }
-                  final int g = ++gen;
-                  try {
-                      android.hardware.biometrics.BiometricPrompt.Builder b =
-                              new android.hardware.biometrics.BiometricPrompt.Builder(getContext())
-                                      .setTitle("باز کردن " + label)
-                                      .setSubtitle("چهره، اثر انگشت یا الگو");
-                      if (android.os.Build.VERSION.SDK_INT >= 30) {
-                          b.setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_WEAK);
-                          b.setConfirmationRequired(false);
-                      }
-                      final java.util.concurrent.Executor ex = ContextCompat.getMainExecutor(getContext());
-                      b.setNegativeButton("استفاده از الگو", ex, new android.content.DialogInterface.OnClickListener() {
-                          @Override public void onClick(android.content.DialogInterface d, int w) {
-                              if (g != gen) return;
-                              prompting = false;
-                              showPattern();
-                          }
-                      });
-                      android.hardware.biometrics.BiometricPrompt bp = b.build();
-                      cs = new android.os.CancellationSignal();
-                      prompting = true;
-                      bp.authenticate(cs, ex,
-                              new android.hardware.biometrics.BiometricPrompt.AuthenticationCallback() {
-                                  @Override public void onAuthenticationSucceeded(
-                                          android.hardware.biometrics.BiometricPrompt.AuthenticationResult r) {
-                                      if (g != gen) return;
-                                      prompting = false;
-                                      onSuccess.run();
-                                  }
-
-                                  @Override public void onAuthenticationError(int code, CharSequence msg) {
-                                      if (g != gen) return;
-                                      prompting = false;
-                                      // 5 canceled by system, 10 user canceled, 13 negative button: just show the pattern
-                                      if (code == 5 || code == 10 || code == 13) {
-                                          showPattern();
-                                      } else if (code == 7 || code == 9) {
-                                          showPattern();
-                                          status.setText(msg);
-                                      } else {
-                                          // the dialog cannot be shown from here: use the short-lived fallback host
-                                          prompting = true;
-                                          Guard.startBio(getContext(), label);
-                                      }
-                                  }
-                              });
-                  } catch (Throwable t) {
-                      Guard.startBio(getContext(), label);
-                      prompting = true;
-                  }
-              }
-
               private void prompt(final boolean face) {
                   if (prompting) return;
                   int auth = BiometricManager.Authenticators.BIOMETRIC_WEAK;
@@ -1154,8 +1131,12 @@ jobs:
                       return;
                   }
                   if (act == null) {
-                      // overlay mode: the system dialog is shown directly, no activity / task is created
-                      promptDirect();
+                      // overlay mode: the system only allows the dialog from an activity of this app,
+                      // so an invisible one lives just while the dialog is on screen
+                      row.setVisibility(View.VISIBLE);
+                      status.setText("اثر انگشت را روی حسگر بگذارید");
+                      prompting = true;
+                      Guard.startBio(getContext(), label);
                       return;
                   }
                   BiometricPrompt.PromptInfo info = new BiometricPrompt.PromptInfo.Builder()
@@ -1252,13 +1233,19 @@ jobs:
           import android.widget.TextView;
 
           import java.util.ArrayList;
+          import java.util.List;
           import java.util.Map;
 
-          // 1) Instant detection of the app that comes to the front (no activity is ever started).
-          // 2) In the recents screen, covers the cards of locked apps so their content is not visible.
+          // 1) Detects the app that comes to the front, and the tap on a locked app's icon / recents card
+          //    (so the lock appears before the app even starts). No activity is started for this.
+          // 2) In the recents screen, covers the thumbnail of locked apps.
           public class AppLockAccess extends AccessibilityService {
               static volatile boolean live = false;
               static volatile AppLockAccess instance = null;
+
+              private static final int BASE = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
+              private static final int LAUNCHER_EVENTS = BASE | AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                      | AccessibilityEvent.TYPE_VIEW_SCROLLED | AccessibilityEvent.TYPE_VIEW_CLICKED;
 
               private static class Cover {
                   String pkg;
@@ -1271,7 +1258,7 @@ jobs:
               private boolean queued = false;
               private boolean contentOn = false;
               private long lastScan = 0;
-              private boolean lastEmpty = true;
+              private int retries = 0;
               private int budget;
               private boolean evidence;
 
@@ -1288,6 +1275,7 @@ jobs:
                   live = true;
                   Guard.warm(this);
                   Guard.cacheIcons(this);
+                  setContentEvents(true);
               }
 
               @Override public void onAccessibilityEvent(AccessibilityEvent e) {
@@ -1305,16 +1293,41 @@ jobs:
                       }
                       Guard.onFg(this, p, System.currentTimeMillis());
                       if (Guard.isHome(this, p)) {
-                          // content/scroll events are only listened to while the launcher (recents) is on screen
                           setContentEvents(true);
-                          queueScan();
+                          retries = 10;
+                          queueScan(0);
                       } else if (!p.equals("com.android.systemui") && !p.equals("android") && !p.equals(getPackageName())) {
                           setContentEvents(false);
                           clearCovers();
                       }
                   } else if (Guard.isHome(this, p)) {
-                      queueScan();
+                      if (type == AccessibilityEvent.TYPE_VIEW_CLICKED) onClick(e);
+                      else queueScan(covers.isEmpty() ? 40 : 60);
                   }
+              }
+
+              // tap on an icon (home screen / folder) or on a recents card of a locked app
+              private void onClick(AccessibilityEvent e) {
+                  try {
+                      Map<String, String> labels = Guard.lockedLabels(this);
+                      if (labels.isEmpty()) return;
+                      String pkg = match(labels, e.getContentDescription());
+                      if (pkg == null && e.getText() != null) {
+                          for (CharSequence t : e.getText()) {
+                              pkg = match(labels, t);
+                              if (pkg != null) break;
+                          }
+                      }
+                      if (pkg == null) {
+                          AccessibilityNodeInfo src = e.getSource();
+                          for (int k = 0; k < 3 && src != null && pkg == null; k++) {
+                              pkg = match(labels, src.getContentDescription());
+                              if (pkg == null) pkg = match(labels, src.getText());
+                              src = src.getParent();
+                          }
+                      }
+                      if (pkg != null) Guard.preLock(this, pkg);
+                  } catch (Throwable ignored) { }
               }
 
               private void setContentEvents(boolean on) {
@@ -1322,19 +1335,17 @@ jobs:
                   try {
                       AccessibilityServiceInfo i = getServiceInfo();
                       if (i == null) return;
-                      int base = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
-                      i.eventTypes = on ? (base | AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
-                              | AccessibilityEvent.TYPE_VIEW_SCROLLED) : base;
+                      i.eventTypes = on ? LAUNCHER_EVENTS : BASE;
                       setServiceInfo(i);
                       contentOn = on;
                   } catch (Throwable ignored) { }
               }
 
-              private void queueScan() {
+              private void queueScan(long delay) {
                   if (queued) return;
-                  if (lastEmpty && System.currentTimeMillis() - lastScan < 400) return;
+                  if (delay > 0 && System.currentTimeMillis() - lastScan < delay) return;
                   queued = true;
-                  mh.postDelayed(scan, 30);
+                  mh.postDelayed(scan, 0);
               }
 
               private static String match(Map<String, String> labels, CharSequence t) {
@@ -1349,30 +1360,63 @@ jobs:
 
               private static boolean cardSized(Rect r, int W, int H) {
                   int w = r.width(), h = r.height();
-                  return w >= W * 0.35f && w <= W * 0.95f && h >= H * 0.12f && h <= H * 0.75f;
+                  return w >= W * 0.35f && w <= W * 1.02f && h >= H * 0.10f && h <= H * 0.75f;
               }
 
               private void walk(AccessibilityNodeInfo n, Map<String, String> labels, int W, int H,
-                                ArrayList<Object[]> big, ArrayList<Object[]> small, int depth) {
-                  if (n == null || budget-- <= 0 || depth > 32) return;
+                                ArrayList<Object[]> rows, ArrayList<Object[]> small, List<Rect> all, int depth) {
+                  if (n == null || budget-- <= 0 || depth > 24) return;
                   CharSequence cn = n.getClassName();
                   String id = n.getViewIdResourceName();
                   String key = ((cn == null ? "" : cn.toString()) + " " + (id == null ? "" : id)).toLowerCase();
                   if (key.contains("recents") || key.contains("taskview") || key.contains("task_view")
                           || key.contains("overview")) evidence = true;
+                  Rect r = new Rect();
+                  n.getBoundsInScreen(r);
+                  if (!r.isEmpty() && all.size() < 300 && (long) r.width() * r.height() >= (long) W * H * 0.04f) all.add(r);
                   String pkg = match(labels, n.getContentDescription());
                   if (pkg == null) pkg = match(labels, n.getText());
                   if (pkg != null) {
-                      Rect r = new Rect();
-                      n.getBoundsInScreen(r);
-                      if (cardSized(r, W, H)) {
-                          big.add(new Object[]{pkg, r});
-                          return;
-                      }
-                      small.add(new Object[]{pkg, n});
+                      if (cardSized(r, W, H)) rows.add(new Object[]{pkg, r});
+                      else small.add(new Object[]{pkg, r, n});
                   }
                   int c = n.getChildCount();
-                  for (int i = 0; i < c; i++) walk(n.getChild(i), labels, W, H, big, small, depth + 1);
+                  for (int i = 0; i < c; i++) walk(n.getChild(i), labels, W, H, rows, small, all, depth + 1);
+              }
+
+              private static boolean inside(Rect r, Rect row) {
+                  return r.left >= row.left - 4 && r.right <= row.right + 4 && r.top >= row.top - 4 && r.bottom <= row.bottom + 4;
+              }
+
+              // The matched node can be the whole row (card + app name). Find just the thumbnail.
+              private Rect thumb(Rect row, List<Rect> all, ArrayList<Object[]> small, int W, int H) {
+                  Rect best = null;
+                  long ba = 0;
+                  for (Rect r : all) {
+                      if (r.equals(row) || !inside(r, row)) continue;
+                      int w = r.width();
+                      if (w > W * 0.75f || w < W * 0.25f || r.height() < H * 0.08f) continue;
+                      long a = (long) w * r.height();
+                      if (a > ba) { ba = a; best = r; }
+                  }
+                  if (best != null) return new Rect(best);
+                  if (row.width() <= W * 0.7f) return new Rect(row);
+                  Rect lab = null;
+                  for (Object[] sm : small) {
+                      Rect lr = (Rect) sm[1];
+                      if (inside(lr, row)) { lab = lr; break; }
+                  }
+                  Rect out = new Rect(row);
+                  int cw = Math.round(row.height() * 1.24f);
+                  int pad = Math.round(row.width() * 0.03f);
+                  if (lab != null && lab.centerX() > row.centerX()) {
+                      out.left = Math.max(0, row.left + pad - 8);
+                      out.right = Math.min(W, out.left + cw + 16);
+                  } else if (lab != null) {
+                      out.right = Math.min(W, row.right - pad + 8);
+                      out.left = Math.max(0, out.right - cw - 16);
+                  }
+                  return out;
               }
 
               private void doScan() {
@@ -1387,26 +1431,41 @@ jobs:
                   if (labels.isEmpty()) { clearCovers(); return; }
                   int W = getResources().getDisplayMetrics().widthPixels;
                   int H = getResources().getDisplayMetrics().heightPixels;
-                  ArrayList<Object[]> big = new ArrayList<>(), small = new ArrayList<>();
-                  budget = 2500;
+                  ArrayList<Object[]> rows = new ArrayList<>(), small = new ArrayList<>();
+                  ArrayList<Rect> all = new ArrayList<>();
+                  budget = 900;
                   evidence = false;
-                  walk(root, labels, W, H, big, small, 0);
-                  ArrayList<Object[]> found = new ArrayList<>(big);
-                  if (found.isEmpty() && evidence) {
-                      // the label is a small view inside the card: climb to the card
+                  walk(root, labels, W, H, rows, small, all, 0);
+                  if (rows.isEmpty() && evidence) {
+                      // the name is a small view inside the card: climb to the card
                       for (Object[] sm : small) {
-                          AccessibilityNodeInfo n = (AccessibilityNodeInfo) sm[1];
+                          AccessibilityNodeInfo n = (AccessibilityNodeInfo) sm[2];
                           for (int k = 0; k < 8 && n != null; k++) {
                               n = n.getParent();
                               if (n == null) break;
                               Rect r = new Rect();
                               n.getBoundsInScreen(r);
-                              if (cardSized(r, W, H)) { found.add(new Object[]{sm[0], r}); break; }
+                              if (cardSized(r, W, H)) { rows.add(new Object[]{sm[0], r}); break; }
                           }
                       }
                   }
-                  lastEmpty = found.isEmpty();
+                  ArrayList<Object[]> found = new ArrayList<>();
+                  for (Object[] row : rows) {
+                      Rect rr = (Rect) row[1];
+                      boolean dup = false;
+                      for (Object[] f : found) {
+                          Rect fr = (Rect) f[2];
+                          if (inside(rr, fr) || inside(fr, rr)) { dup = true; break; }
+                      }
+                      if (dup) continue;
+                      found.add(new Object[]{row[0], thumb(rr, all, small, W, H), rr});
+                  }
                   showCovers(found);
+                  if (found.isEmpty() && retries-- > 0) {
+                      // the recents list may not be filled yet: look again very soon
+                      queued = true;
+                      mh.postDelayed(scan, 50);
+                  }
               }
 
               private View makeCover(String pkg) {
@@ -1420,14 +1479,14 @@ jobs:
                   ImageView iv = new ImageView(this);
                   Drawable ic = Guard.icon(pkg);
                   if (ic != null) iv.setImageDrawable(ic);
-                  l.addView(iv, new LinearLayout.LayoutParams(Prefs.dp(this, 56), Prefs.dp(this, 56)));
+                  l.addView(iv, new LinearLayout.LayoutParams(Prefs.dp(this, 52), Prefs.dp(this, 52)));
                   TextView t = new TextView(this);
                   t.setText(Guard.label(pkg) + " قفل است");
                   t.setTextColor(Color.WHITE);
-                  t.setTextSize(15);
+                  t.setTextSize(14);
                   t.setTypeface(null, Typeface.BOLD);
                   t.setGravity(Gravity.CENTER);
-                  t.setPadding(0, Prefs.dp(this, 10), 0, 0);
+                  t.setPadding(0, Prefs.dp(this, 8), 0, 0);
                   l.addView(t);
                   return l;
               }
@@ -1450,7 +1509,6 @@ jobs:
 
               private void showCovers(ArrayList<Object[]> found) {
                   WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-                  // drop extra covers
                   while (covers.size() > found.size()) {
                       Cover c = covers.remove(covers.size() - 1);
                       try { wm.removeView(c.v); } catch (Exception ignored) { }
