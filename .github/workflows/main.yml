@@ -288,6 +288,8 @@ jobs:
               static void setSelfMethod(Context c, int m) { sp(c).edit().putInt("self_method", m).apply(); }
               static boolean selfLock(Context c) { return sp(c).getBoolean("self_lock", true); }
               static void setSelfLock(Context c, boolean v) { sp(c).edit().putBoolean("self_lock", v).apply(); }
+              static boolean accMode(Context c) { return sp(c).getBoolean("acc_mode", true); }
+              static void setAccMode(Context c, boolean v) { sp(c).edit().putBoolean("acc_mode", v).apply(); }
 
               static String hash(String s) {
                   try {
@@ -474,7 +476,7 @@ jobs:
               private final Runnable tick = new Runnable() {
                   @Override public void run() {
                       long next = 1000;
-                      if (!LockAccessibility.connected) {
+                      if (!(Prefs.accMode(LockService.this) && LockAccessibility.connected)) {
                           try { poll(); } catch (Exception ignored) { }
                           next = 60;
                       } else {
@@ -868,6 +870,7 @@ jobs:
 
               @Override public void onAccessibilityEvent(AccessibilityEvent e) {
                   if (e == null || e.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
+                  if (!Prefs.accMode(this)) return;
                   CharSequence p = e.getPackageName();
                   if (p == null) return;
                   Guard.onFg(this, p.toString());
@@ -1319,7 +1322,7 @@ jobs:
                   if (banner == null) return;
                   boolean overlay = Settings.canDrawOverlays(this);
                   boolean acc = Prefs.accEnabled(this);
-                  boolean ok = overlay && acc;
+                  boolean ok = overlay && (Prefs.accMode(this) ? acc : Prefs.hasUsage(this));
                   banner.setVisibility(ok ? View.GONE : View.VISIBLE);
                   if (overlay && (acc || Prefs.hasUsage(this)) && !LockService.running) {
                       startForegroundService(new Intent(this, LockService.class));
@@ -1347,7 +1350,16 @@ jobs:
                                               Uri.parse("package:" + getPackageName())));
                                   }
                               });
-                  } else if (!Prefs.accEnabled(this)) {
+                  } else if (!Prefs.accMode(this) && !Prefs.hasUsage(this)) {
+                  ask("دسترسی به آمار استفاده",
+                          "برای تشخیص اینکه کدام برنامه باز شده این دسترسی لازم است. در صفحه بعد «قفل برنامه» را پیدا و روشن کنید. (با روشن کردن «حالت دسترس‌پذیری» در تنظیمات، باز شدن قفل سریع‌تر می‌شود.)",
+                          new Runnable() {
+                              @Override public void run() {
+                                  leaving = true;
+                                  startActivity(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS));
+                              }
+                          });
+              } else if (Prefs.accMode(this) && !Prefs.accEnabled(this)) {
                       ask("سرویس دسترسی‌پذیری",
                               "برای اینکه صفحه قفل بدون هیچ تأخیری و قبل از دیده شدن برنامه باز شود، این سرویس لازم است. در صفحه بعد «قفل برنامه» را پیدا و روشن کنید. هیچ اطلاعاتی خوانده یا ذخیره نمی‌شود.\n\nاگر گزینه خاکستری بود: تنظیمات گوشی > برنامه‌ها > قفل برنامه > منوی ⋮ بالا > «اجازه تنظیمات محدودشده» را بزنید و دوباره تلاش کنید.",
                               new Runnable() {
@@ -1376,6 +1388,7 @@ jobs:
                           "روش باز کردن برنامه‌های قفل‌شده: " + Prefs.METHODS[Prefs.appMethod(this)],
                           "روش ورود به همین برنامه: " + Prefs.METHODS[Prefs.selfMethod(this)],
                           "قفل ورود به همین برنامه: " + (Prefs.selfLock(this) ? "روشن" : "خاموش"),
+                          "حالت دسترس‌پذیری (باز شدن سریع‌تر): " + (Prefs.accMode(this) ? "روشن" : "خاموش"),
                           "تغییر الگو",
                           "پشتیبان",
                           "بررسی دسترسی‌ها"
@@ -1391,11 +1404,17 @@ jobs:
                                       Prefs.setSelfLock(MainActivity.this, nv);
                                       if (nv) selfOk = true;
                                       toast(nv ? "قفل ورود روشن شد" : "قفل ورود خاموش شد");
-                                  } else if (w == 3) patternSetup(true);
-                                  else if (w == 4) backupDialog();
+                                  } else if (w == 3) {
+                                  boolean nv = !Prefs.accMode(MainActivity.this);
+                                  Prefs.setAccMode(MainActivity.this, nv);
+                                  asked = false;
+                                  toast(nv ? "حالت دسترس‌پذیری روشن شد" : "حالت دسترس‌پذیری خاموش شد");
+                                  refreshPerms();
+                              } else if (w == 4) patternSetup(true);
+                                  else if (w == 5) backupDialog();
                                   else {
                                       asked = false;
-                                      if (Settings.canDrawOverlays(MainActivity.this) && Prefs.accEnabled(MainActivity.this)) {
+                                      if (Settings.canDrawOverlays(MainActivity.this) && (Prefs.accMode(MainActivity.this) ? Prefs.accEnabled(MainActivity.this) : Prefs.hasUsage(MainActivity.this))) {
                                           toast("همه دسترسی‌ها داده شده است");
                                       } else {
                                           requestNext();
