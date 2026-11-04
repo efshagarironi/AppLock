@@ -509,6 +509,7 @@ jobs:
               private TextView title, status;
               private ImageView icon;
               private PatternView pv;
+              private LinearLayout row;
 
               private int dp(int v) { return Prefs.dp(this, v); }
 
@@ -556,7 +557,7 @@ jobs:
                       }
                   };
 
-                  LinearLayout row = new LinearLayout(this);
+                  row = new LinearLayout(this);
                   row.setOrientation(LinearLayout.HORIZONTAL);
                   row.setGravity(Gravity.CENTER);
                   LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
@@ -629,6 +630,7 @@ jobs:
                       showPattern();
                   } else {
                       pv.setVisibility(View.GONE);
+                      row.setVisibility(View.GONE);
                       prompt(m == 1);
                   }
               }
@@ -637,6 +639,7 @@ jobs:
                   pv.setVisibility(View.VISIBLE);
                   pv.clear();
                   status.setText("الگو را بکشید");
+                  row.setVisibility(View.VISIBLE);
               }
 
               private void prompt(final boolean face) {
