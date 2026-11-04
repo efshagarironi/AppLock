@@ -168,6 +168,7 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
               <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+              <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
 
               <application
                   android:allowBackup="false"
@@ -185,14 +186,18 @@ jobs:
                       </intent-filter>
                   </activity>
 
-                  <activity
-                      android:name=".BioActivity"
-                      android:exported="false"
-                      android:excludeFromRecents="true"
-                      android:autoRemoveFromRecents="true"
-                      android:launchMode="singleTask"
-                      android:taskAffinity=""
-                      android:theme="@style/BioTheme" />
+                  <service
+                      android:name=".AppLockAccess"
+                      android:exported="true"
+                      android:label="قفل برنامه"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
 
                   <service
                       android:name=".LockService"
@@ -236,6 +241,13 @@ jobs:
                   <item name="android:windowAnimationStyle">@null</item>
               </style>
 
+              <style name="NoAnim" parent="@android:style/Animation">
+                  <item name="android:windowEnterAnimation">@null</item>
+                  <item name="android:windowExitAnimation">@null</item>
+                  <item name="android:windowShowAnimation">@null</item>
+                  <item name="android:windowHideAnimation">@null</item>
+              </style>
+
               <style name="BioTheme" parent="Theme.AppCompat.Light.NoActionBar">
                   <item name="android:windowIsTranslucent">true</item>
                   <item name="android:windowBackground">@android:color/transparent</item>
@@ -269,6 +281,7 @@ jobs:
           import android.content.Context;
           import android.content.SharedPreferences;
           import android.os.Process;
+          import android.provider.Settings;
 
           import java.security.MessageDigest;
           import java.util.HashSet;
@@ -355,6 +368,24 @@ jobs:
               static boolean checkPattern(Context c, String code) {
                   String h = sp(c).getString("pattern", null);
                   return h != null && h.equals(hash(code));
+              }
+
+              static boolean hasAccess(Context c) {
+                  try {
+                      String s = Settings.Secure.getString(c.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+                      if (s == null) return false;
+                      String me = (c.getPackageName() + "/" + AppLockAccess.class.getName()).toLowerCase();
+                      String me2 = (c.getPackageName() + "/." + AppLockAccess.class.getSimpleName()).toLowerCase();
+                      String l = s.toLowerCase();
+                      return l.contains(me) || l.contains(me2);
+                  } catch (Exception e) {
+                      return false;
+                  }
+              }
+
+              // lock works with either: accessibility (instant) or overlay + usage access (fallback)
+              static boolean canLock(Context c) {
+                  return hasAccess(c) || (Settings.canDrawOverlays(c) && hasUsage(c));
               }
 
               @SuppressWarnings("deprecation")
@@ -524,8 +555,11 @@ jobs:
 
               private final Runnable tick = new Runnable() {
                   @Override public void run() {
-                      try { poll(); } catch (Exception ignored) { }
-                      if (bg != null) bg.postDelayed(this, Prefs.pollMs(LockService.this));
+                      try {
+                          if (AppLockAccess.live) last = System.currentTimeMillis();
+                          else poll();
+                      } catch (Exception ignored) { }
+                      if (bg != null) bg.postDelayed(this, AppLockAccess.live ? 1000 : Prefs.pollMs(LockService.this));
                   }
               };
 
@@ -540,6 +574,10 @@ jobs:
                       ht = new HandlerThread("lockpoll");
                       ht.start();
                       bg = new Handler(ht.getLooper());
+                      Guard.warm(this);
+                      bg.post(new Runnable() {
+                          @Override public void run() { Guard.cacheIcons(LockService.this); }
+                      });
                       bg.post(tick);
                   }
                   return START_STICKY;
@@ -575,8 +613,9 @@ jobs:
                       if (e.getTimeStamp() > maxT) maxT = e.getTimeStamp();
                       if (e.getEventType() == UsageEvents.Event.MOVE_TO_FOREGROUND) {
                           final String pk = e.getPackageName();
+                              final long ts = e.getTimeStamp();
                           h.post(new Runnable() {
-                              @Override public void run() { Guard.onFg(LockService.this, pk); }
+                              @Override public void run() { Guard.onFg(LockService.this, pk, ts); }
                           });
                       }
                   }
@@ -588,15 +627,18 @@ jobs:
                   if (bg != null) bg.removeCallbacks(tick);
                   if (ht != null) ht.quit();
                   Guard.hideLock();
+                  Guard.release();
                   try { unregisterReceiver(off); } catch (Exception ignored) { }
                   super.onDestroy();
               }
           }
           EOF
 
-                    cat > app/src/main/java/com/applock/pro/Guard.java << 'EOF'
+                              cat > app/src/main/java/com/applock/pro/Guard.java << 'EOF'
           package com.applock.pro;
 
+          import android.accessibilityservice.AccessibilityService;
+          import android.app.ActivityManager;
           import android.content.Context;
           import android.content.Intent;
           import android.content.pm.PackageManager;
@@ -604,6 +646,8 @@ jobs:
           import android.graphics.PixelFormat;
           import android.graphics.drawable.Drawable;
           import android.os.Build;
+          import android.os.Handler;
+          import android.os.Looper;
           import android.os.SystemClock;
           import android.provider.Settings;
           import android.view.ViewGroup;
@@ -613,14 +657,20 @@ jobs:
 
           import java.util.HashSet;
           import java.util.Set;
+          import java.util.concurrent.ConcurrentHashMap;
 
-          // The lock screen is drawn as an overlay window (no activity, no animation, no recents card).
+          // The lock screen is an overlay window (no activity, no animation, no recents card).
           final class Guard {
               static volatile String unlocked = null;
               static volatile String lockPkg = null;
 
-              private static LockPanel panel;
+              private static final Handler H = new Handler(Looper.getMainLooper());
+              private static final ConcurrentHashMap<String, String> LABELS = new ConcurrentHashMap<>();
+              private static final ConcurrentHashMap<String, Drawable> ICONS = new ConcurrentHashMap<>();
+              private static LockPanel panel;      // currently visible
+              private static LockPanel spare;      // pre-built, ready to show instantly
               private static WindowManager panelWm;
+              private static long shownAt = 0;
               private static Set<String> ime = new HashSet<>();
               private static long imeAt = 0;
 
@@ -638,14 +688,23 @@ jobs:
                   return ime;
               }
 
+              private static Set<String> homes = new HashSet<>();
+              private static long homesAt = 0;
+
               private static boolean isHome(Context c, String pkg) {
-                  try {
-                      Intent h = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
-                      for (ResolveInfo ri : c.getPackageManager().queryIntentActivities(h, 0)) {
-                          if (pkg.equals(ri.activityInfo.packageName)) return true;
-                      }
-                  } catch (Exception ignored) { }
-                  return false;
+                  long now = SystemClock.uptimeMillis();
+                  if (homesAt == 0 || now - homesAt > 60000) {
+                      Set<String> s = new HashSet<>();
+                      try {
+                          Intent h = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+                          for (ResolveInfo ri : c.getPackageManager().queryIntentActivities(h, 0)) {
+                              s.add(ri.activityInfo.packageName);
+                          }
+                      } catch (Exception ignored) { }
+                      homes = s;
+                      homesAt = now;
+                  }
+                  return homes.contains(pkg);
               }
 
               // System dialogs (permissions, installer...) can appear above a locked app: they must not remove the lock.
@@ -653,8 +712,42 @@ jobs:
                   return pkg.startsWith("com.android.") || pkg.contains("permissioncontroller") || pkg.contains("packageinstaller");
               }
 
-              // Called (on the main thread) whenever a new app comes to the front.
+              // ---------- warm-up: the lock screen is built before it is needed ----------
+              private static LockPanel newPanel(Context c) {
+                  return new LockPanel(c, null, false, new Runnable() {
+                      @Override public void run() { authSuccess(); }
+                  });
+              }
+
+              static void warm(Context c) {
+                  try { if (spare == null) spare = newPanel(c); } catch (Exception ignored) { }
+              }
+
+              private static void load(PackageManager pm, String pkg) {
+                  if (LABELS.containsKey(pkg) && ICONS.containsKey(pkg)) return;
+                  try {
+                      LABELS.put(pkg, pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString());
+                      ICONS.put(pkg, pm.getApplicationIcon(pkg));
+                  } catch (Exception ignored) { }
+              }
+
+              static void cacheIcons(Context c) {
+                  PackageManager pm = c.getPackageManager();
+                  for (String p : Prefs.locked(c)) load(pm, p);
+              }
+
+              static void release() {
+                  spare = null;
+                  LABELS.clear();
+                  ICONS.clear();
+              }
+
+              // Called (on the main thread) whenever a new app comes to the front. ts = time of the event.
               static void onFg(Context c, String pkg) {
+                  onFg(c, pkg, System.currentTimeMillis());
+              }
+
+              static void onFg(Context c, String pkg, long ts) {
                   if (pkg == null) return;
                   if (pkg.equals(c.getPackageName())) return;
                   if (pkg.equals("com.android.systemui") || pkg.equals("android")) return;
@@ -666,31 +759,33 @@ jobs:
                   }
                   boolean isLocked = Prefs.locked(c).contains(pkg);
                   if (panel != null && !pkg.equals(lockPkg)) {
-                      if (isLocked || isHome(c, pkg) || !systemish(pkg)) hideLock();
+                      // old events that were queued before the lock screen appeared must not remove it
+                      if (ts < shownAt + 250) return;
+                      if (!isLocked && (isHome(c, pkg) || !systemish(pkg))) {
+                          leave(c);
+                          return;
+                      }
                   }
                   if (!isLocked || pkg.equals(u)) return;
                   if (panel != null && pkg.equals(lockPkg)) return;
+                  if (panel != null) leave(c);
                   showLock(c, pkg);
               }
 
-              static void showLock(Context c, final String pkg) {
-                  if (!Settings.canDrawOverlays(c)) return;
-                  hideLock();
+              static void showLock(Context c, String pkg) {
+                  // accessibility overlay: instant, needs no extra permission, sits above everything
+                  AccessibilityService acc = AppLockAccess.live ? AppLockAccess.instance : null;
+                  if (acc == null && !Settings.canDrawOverlays(c)) return;
                   try {
-                      String label = pkg;
-                      Drawable ic = null;
-                      try {
-                          PackageManager pm = c.getPackageManager();
-                          label = pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString();
-                          ic = pm.getApplicationIcon(pkg);
-                      } catch (Exception ignored) { }
-                      LockPanel p = new LockPanel(c, null, false, new Runnable() {
-                          @Override public void run() { authSuccess(); }
-                      });
-                      p.bind(label, ic);
+                      load(c.getPackageManager(), pkg);
+                      LockPanel p = spare != null ? spare : newPanel(c);
+                      spare = null;
+                      String label = LABELS.get(pkg);
+                      p.bind(label != null ? label : pkg, ICONS.get(pkg));
                       WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                               ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
-                              WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                              acc != null ? WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                                      : WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                               WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                                       | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                                       | WindowManager.LayoutParams.FLAG_FULLSCREEN
@@ -699,16 +794,19 @@ jobs:
                       if (Build.VERSION.SDK_INT >= 28) {
                           lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
                       }
-                      WindowManager wm = (WindowManager) c.getSystemService(Context.WINDOW_SERVICE);
+                      lp.windowAnimations = R.style.NoAnim;
+                      WindowManager wm = (WindowManager) (acc != null ? acc : c).getSystemService(Context.WINDOW_SERVICE);
+                      p.start();
                       wm.addView(p, lp);
                       panel = p;
                       panelWm = wm;
                       lockPkg = pkg;
-                      p.start();
+                      shownAt = System.currentTimeMillis();
                   } catch (Exception ignored) { }
               }
 
-              static void hideLock() {
+              // Removes the lock screen (the view is kept for the next time).
+              private static void removePanel() {
                   LockPanel p = panel;
                   WindowManager w = panelWm;
                   panel = null;
@@ -716,34 +814,48 @@ jobs:
                   lockPkg = null;
                   if (p != null && w != null) {
                       try { w.removeView(p); } catch (Exception ignored) { }
+                      spare = p;
+                  }
+              }
+
+              static void hideLock() {
+                  removePanel();
+              }
+
+              // The person left without unlocking: the locked app is closed so it does not stay open in the background.
+              static void leave(Context c) {
+                  String p = lockPkg;
+                  removePanel();
+                  if (p != null) kill(c, p);
+              }
+
+              private static void kill(Context c, final String pkg) {
+                  final ActivityManager am = (ActivityManager) c.getApplicationContext().getSystemService(Context.ACTIVITY_SERVICE);
+                  if (am == null) return;
+                  long[] delays = {300, 1200};
+                  for (long d : delays) {
+                      H.postDelayed(new Runnable() {
+                          @Override public void run() {
+                              try {
+                                  if (!pkg.equals(unlocked) && !pkg.equals(lockPkg)) am.killBackgroundProcesses(pkg);
+                              } catch (Exception ignored) { }
+                          }
+                      }, d);
                   }
               }
 
               static void authSuccess() {
                   String p = lockPkg;
                   if (p != null) unlocked = p;
-                  hideLock();
+                  removePanel();
               }
 
               static void goHome(Context c) {
-                  hideLock();
+                  leave(c);
                   Intent h = new Intent(Intent.ACTION_MAIN);
                   h.addCategory(Intent.CATEGORY_HOME);
                   h.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                   c.startActivity(h);
-              }
-
-              // Fingerprint / face are shown by an invisible activity; the lock screen stays visible behind it.
-              static void startBio(Context c, String label) {
-                  Intent i = new Intent(c, BioActivity.class)
-                          .putExtra("label", label)
-                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION
-                                  | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
-                  try {
-                      c.startActivity(i, android.app.ActivityOptions.makeCustomAnimation(c, 0, 0).toBundle());
-                  } catch (Exception e) {
-                      c.startActivity(i);
-                  }
               }
 
               static void fallbackPattern(String msg) {
@@ -859,12 +971,18 @@ jobs:
 
               public void bind(String label, Drawable ic) {
                   this.label = label;
-                  if (ic != null) icon.setImageDrawable(ic);
+                  icon.setImageDrawable(ic);
                   title.setText(self ? "ورود به «قفل برنامه»" : label + " قفل است");
                   status.setText("");
               }
 
               public void start() {
+                  if (act == null && !self) {
+                      // overlay: the pattern is ready at once, fingerprint / face start only when their button is tapped
+                      prompting = false;
+                      showPattern();
+                      return;
+                  }
                   use(self ? Prefs.selfMethod(getContext()) : Prefs.appMethod(getContext()));
               }
 
@@ -905,6 +1023,53 @@ jobs:
                   row.setVisibility(View.VISIBLE);
               }
 
+              @android.annotation.SuppressLint("NewApi")
+              private void promptDirect() {
+                  if (android.os.Build.VERSION.SDK_INT < 28) {
+                      showPattern();
+                      status.setText("اثر انگشت/چهره در این نسخه اندروید پشتیبانی نمی‌شود؛ الگو را بکشید");
+                      return;
+                  }
+                  try {
+                      android.hardware.biometrics.BiometricPrompt.Builder b =
+                              new android.hardware.biometrics.BiometricPrompt.Builder(getContext())
+                                      .setTitle("باز کردن " + label)
+                                      .setSubtitle("چهره، اثر انگشت یا الگو");
+                      if (android.os.Build.VERSION.SDK_INT >= 30) {
+                          b.setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_WEAK);
+                          b.setConfirmationRequired(false);
+                      }
+                      final java.util.concurrent.Executor ex = ContextCompat.getMainExecutor(getContext());
+                      b.setNegativeButton("استفاده از الگو", ex, new android.content.DialogInterface.OnClickListener() {
+                          @Override public void onClick(android.content.DialogInterface d, int w) {
+                              prompting = false;
+                              showPattern();
+                          }
+                      });
+                      android.hardware.biometrics.BiometricPrompt bp = b.build();
+                      prompting = true;
+                      bp.authenticate(new android.os.CancellationSignal(), ex,
+                              new android.hardware.biometrics.BiometricPrompt.AuthenticationCallback() {
+                                  @Override public void onAuthenticationSucceeded(
+                                          android.hardware.biometrics.BiometricPrompt.AuthenticationResult r) {
+                                      prompting = false;
+                                      onSuccess.run();
+                                  }
+
+                                  @Override public void onAuthenticationError(int code, CharSequence msg) {
+                                      prompting = false;
+                                      showPattern();
+                                      // 5 = canceled by system, 10 = user canceled: just show the pattern
+                                      if (code != 5 && code != 10 && code != 13) status.setText(msg);
+                                  }
+                              });
+                  } catch (Throwable t) {
+                      prompting = false;
+                      showPattern();
+                      status.setText("اثر انگشت/چهره در دسترس نیست؛ الگو را بکشید");
+                  }
+              }
+
               private void prompt(final boolean face) {
                   if (prompting) return;
                   int auth = BiometricManager.Authenticators.BIOMETRIC_WEAK;
@@ -915,8 +1080,8 @@ jobs:
                       return;
                   }
                   if (act == null) {
-                      prompting = true;
-                      Guard.startBio(getContext(), label);
+                      // overlay mode: the system dialog is shown directly, no activity / task is created
+                      promptDirect();
                       return;
                   }
                   BiometricPrompt.PromptInfo info = new BiometricPrompt.PromptInfo.Builder()
@@ -949,83 +1114,6 @@ jobs:
           }
           EOF
 
-          cat > app/src/main/java/com/applock/pro/BioActivity.java << 'EOF'
-          package com.applock.pro;
-
-          import android.content.Intent;
-          import android.os.Build;
-          import android.os.Bundle;
-
-          import androidx.appcompat.app.AppCompatActivity;
-          import androidx.biometric.BiometricManager;
-          import androidx.biometric.BiometricPrompt;
-          import androidx.core.content.ContextCompat;
-
-          // Invisible host for the system fingerprint / face dialog. The lock screen itself is an overlay window.
-          public class BioActivity extends AppCompatActivity {
-              private boolean showing = false;
-
-              @Override protected void onCreate(Bundle b) {
-                  super.onCreate(b);
-                  overridePendingTransition(0, 0);
-                  if (Build.VERSION.SDK_INT >= 33) {
-                      try { setRecentsScreenshotEnabled(false); } catch (Throwable ignored) { }
-                  }
-                  show(getIntent());
-              }
-
-              @Override protected void onNewIntent(Intent in) {
-                  super.onNewIntent(in);
-                  setIntent(in);
-                  show(in);
-              }
-
-              private void show(Intent in) {
-                  if (showing) return;
-                  showing = true;
-                  String label = in.getStringExtra("label");
-                  if (label == null) label = "";
-                  BiometricPrompt.PromptInfo info = new BiometricPrompt.PromptInfo.Builder()
-                          .setTitle("باز کردن " + label)
-                          .setSubtitle("چهره، اثر انگشت یا الگو")
-                          .setNegativeButtonText("استفاده از الگو")
-                          .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_WEAK)
-                          .setConfirmationRequired(false)
-                          .build();
-                  new BiometricPrompt(this, ContextCompat.getMainExecutor(this),
-                          new BiometricPrompt.AuthenticationCallback() {
-                              @Override public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult r) {
-                                  showing = false;
-                                  Guard.authSuccess();
-                                  finishAndRemoveTask();
-                              }
-
-                              @Override public void onAuthenticationError(int code, CharSequence msg) {
-                                  showing = false;
-                                  if (code == BiometricPrompt.ERROR_NEGATIVE_BUTTON
-                                          || code == BiometricPrompt.ERROR_USER_CANCELED
-                                          || code == BiometricPrompt.ERROR_CANCELED) {
-                                      Guard.fallbackPattern(null);
-                                  } else {
-                                      Guard.fallbackPattern(String.valueOf(msg));
-                                  }
-                                  finishAndRemoveTask();
-                              }
-                          }).authenticate(info);
-              }
-
-              @Override protected void onUserLeaveHint() {
-                  super.onUserLeaveHint();
-                  finishAndRemoveTask();
-              }
-
-              @Override public void finish() {
-                  super.finish();
-                  overridePendingTransition(0, 0);
-              }
-          }
-          EOF
-
                               cat > app/src/main/res/xml/device_admin.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <device-admin xmlns:android="http://schemas.android.com/apk/res/android">
@@ -1052,7 +1140,69 @@ jobs:
           cat > app/src/main/res/values/strings.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
+              <string name="access_desc">برای تشخیص آنی باز شدن برنامه‌های قفل‌شده و نمایش صفحه قفل پیش از دیده شدن برنامه. این سرویس هیچ اطلاعاتی را نمی‌خواند، ذخیره یا ارسال نمی‌کند.</string>
           </resources>
+          EOF
+
+          cat > app/src/main/res/xml/accessibility_config.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagIncludeNotImportantViews"
+              android:canRetrieveWindowContent="false"
+              android:notificationTimeout="0"
+              android:description="@string/access_desc" />
+          EOF
+
+          cat > app/src/main/java/com/applock/pro/AppLockAccess.java << 'EOF'
+          package com.applock.pro;
+
+          import android.accessibilityservice.AccessibilityService;
+          import android.view.accessibility.AccessibilityEvent;
+
+          // Instant detection of the app that comes to the front. No activity is ever started:
+          // the only thing this service does is tell Guard which package is in front.
+          public class AppLockAccess extends AccessibilityService {
+              static volatile boolean live = false;
+              static volatile AppLockAccess instance = null;
+
+              @Override protected void onServiceConnected() {
+                  super.onServiceConnected();
+                  instance = this;
+                  live = true;
+                  Guard.warm(this);
+                  Guard.cacheIcons(this);
+              }
+
+              @Override public void onAccessibilityEvent(AccessibilityEvent e) {
+                  if (e == null || e.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
+                  CharSequence pk = e.getPackageName();
+                  if (pk == null) return;
+                  CharSequence cn = e.getClassName();
+                  if (cn != null) {
+                      String c = cn.toString();
+                      // popups / menus / toasts of an app are not a new app coming to the front
+                      if (c.startsWith("android.widget.") || c.startsWith("android.view.")) return;
+                  }
+                  Guard.onFg(this, pk.toString(), System.currentTimeMillis());
+              }
+
+              @Override public void onInterrupt() { }
+
+              @Override public boolean onUnbind(android.content.Intent i) {
+                  live = false;
+                  instance = null;
+                  Guard.hideLock();
+                  return super.onUnbind(i);
+              }
+
+              @Override public void onDestroy() {
+                  live = false;
+                  instance = null;
+                  super.onDestroy();
+              }
+          }
           EOF
 
           cat > app/src/main/java/com/applock/pro/BootReceiver.java << 'EOF'
@@ -1066,8 +1216,7 @@ jobs:
           public class BootReceiver extends BroadcastReceiver {
               @Override public void onReceive(Context c, Intent i) {
                   if (Intent.ACTION_BOOT_COMPLETED.equals(i.getAction())
-                          && Settings.canDrawOverlays(c)
-                          && Prefs.hasUsage(c)
+                          && Prefs.canLock(c)
                           && !Prefs.locked(c).isEmpty()) {
                       c.startForegroundService(new Intent(c, LockService.class));
                   }
@@ -1608,11 +1757,9 @@ jobs:
               // ---------- permissions ----------
               private void refreshPerms() {
                   if (banner == null) return;
-                  boolean overlay = Settings.canDrawOverlays(this);
-                  boolean usage = Prefs.hasUsage(this);
-                  boolean ok = overlay && usage;
+                  boolean ok = Prefs.hasAccess(this);
                   banner.setVisibility(ok ? View.GONE : View.VISIBLE);
-                  if (overlay && usage && !LockService.running) {
+                  if (Prefs.canLock(this) && !LockService.running) {
                       startForegroundService(new Intent(this, LockService.class));
                   }
                   if (ok) {
@@ -1628,7 +1775,16 @@ jobs:
               }
 
               private void requestNext() {
-                  if (!Settings.canDrawOverlays(this)) {
+                  if (!Prefs.hasAccess(this)) {
+                      ask("دسترسی‌پذیری (برای قفل سریع و بدون لگ)",
+                              "برای اینکه صفحه قفل همان لحظه و پیش از دیده شدن برنامه بالا بیاید، در صفحه بعد «قفل برنامه» را پیدا و روشن کنید. این سرویس هیچ اطلاعاتی را نمی‌خواند.",
+                              new Runnable() {
+                                  @Override public void run() {
+                                      leaving = true;
+                                      startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                                  }
+                              });
+                  } else if (!Settings.canDrawOverlays(this)) {
                       ask("نمایش روی سایر برنامه‌ها",
                               "برای نمایش صفحه قفل روی برنامه‌های قفل‌شده این دسترسی لازم است. در صفحه بعد «قفل برنامه» را روشن کنید.",
                               new Runnable() {
@@ -1743,7 +1899,7 @@ jobs:
                   addRow(box, dlg, "بررسی دسترسی‌ها", new Runnable() {
                       @Override public void run() {
                           asked = false;
-                          if (Settings.canDrawOverlays(MainActivity.this) && Prefs.hasUsage(MainActivity.this)) {
+                          if (Prefs.hasAccess(MainActivity.this)) {
                               toast("همه دسترسی‌ها داده شده است");
                           } else {
                               requestNext();
