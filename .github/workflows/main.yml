@@ -478,7 +478,7 @@ jobs:
                       long next = 1000;
                       if (!(Prefs.accMode(LockService.this) && LockAccessibility.connected)) {
                           try { poll(); } catch (Exception ignored) { }
-                          next = 60;
+                          next = 10;
                       } else {
                           last = System.currentTimeMillis();
                       }
